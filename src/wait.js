@@ -1,7 +1,23 @@
-import { evaluate } from './connection.js';
+import { evaluate, KNOWN_PATHS } from './connection.js';
 
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
+const CHART_API = KNOWN_PATHS.chartApi;
+
+/**
+ * Normalize a TradingView resolution string for comparison.
+ * TV resolutions look like "1", "5", "60", "D", "W", "M" and sometimes carry a
+ * leading "1" prefix ("1D" === "D", "1W" === "W"). We uppercase, trim, and strip a
+ * redundant leading "1" before a letter so "1D" and "D" compare equal.
+ */
+function normalizeResolution(res) {
+  if (res === null || res === undefined) return null;
+  let s = String(res).trim().toUpperCase();
+  if (!s) return null;
+  // "1D" -> "D", "1W" -> "W", "1M" (month) -> "M"; but plain "1" (1 minute) stays "1".
+  if (/^1[DWM]$/.test(s)) s = s.slice(1);
+  return s;
+}
 
 /**
  * Generic poll-until helper.
@@ -24,6 +40,7 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
   const start = Date.now();
   let lastBarCount = -1;
   let stableCount = 0;
+  const wantTf = normalizeResolution(expectedTf);
 
   while (Date.now() - start < timeout) {
     const state = await evaluate(`
@@ -34,19 +51,41 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
           || document.querySelector('[data-name="loading"]');
         var isLoading = spinner && spinner.offsetParent !== null;
 
-        // Try to get bar count from data window or chart
+        // Bar-count stability probe scoped to the chart series container so
+        // unrelated UI ("toolbar", "progress bar", etc.) cannot satisfy it.
+        // We count rendered series/bar nodes inside the chart pane(s) only.
         var barCount = -1;
         try {
-          var bars = document.querySelectorAll('[class*="bar"]');
-          barCount = bars.length;
-        } catch {}
+          var panes = document.querySelectorAll('[data-name="pane"], [class*="chart-container"] canvas');
+          if (panes.length) {
+            var n = 0;
+            for (var i = 0; i < panes.length; i++) {
+              var p = panes[i];
+              if (p.tagName === 'CANVAS') { n += 1; continue; }
+              n += p.querySelectorAll('canvas').length;
+            }
+            barCount = n;
+          }
+        } catch (e) {}
 
         // Get current symbol from header
         var symbolEl = document.querySelector('[data-name="legend-source-title"]')
           || document.querySelector('[class*="title"] [class*="apply-common-tooltip"]');
         var currentSymbol = symbolEl ? symbolEl.textContent.trim() : '';
 
-        return { isLoading: !!isLoading, barCount: barCount, currentSymbol: currentSymbol };
+        // Read the chart's actual resolution from the chart API (authoritative).
+        var resolution = null;
+        try {
+          var chart = ${CHART_API};
+          if (chart && typeof chart.resolution === 'function') resolution = chart.resolution();
+        } catch (e) {}
+
+        return {
+          isLoading: !!isLoading,
+          barCount: barCount,
+          currentSymbol: currentSymbol,
+          resolution: resolution,
+        };
       })()
     `);
 
@@ -69,6 +108,18 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
       continue;
     }
 
+    // Check timeframe match if expected. Graceful degradation: only block when we
+    // positively read a DIFFERENT resolution. If the resolution can't be read
+    // (null), we don't gate on it and let the symbol/bar-stability checks decide.
+    if (wantTf) {
+      const actualTf = normalizeResolution(state.resolution);
+      if (actualTf && actualTf !== wantTf) {
+        stableCount = 0;
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+        continue;
+      }
+    }
+
     // Check bar count stability
     if (state.barCount === lastBarCount && state.barCount > 0) {
       stableCount++;
@@ -84,6 +135,6 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
 
-  // Timeout — return true anyway, caller should verify
+  // Timed out without reaching a stable, matching state.
   return false;
 }

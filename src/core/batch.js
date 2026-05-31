@@ -37,7 +37,15 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
           else if (apiPath) await evaluate(`${apiPath}.setResolution(${safeString(tf)})`);
         }
 
-        await waitForChartReady(symbol);
+        const ready = await waitForChartReady(symbol, tf);
+        if (!ready) {
+          results.push({
+            ...combo,
+            success: false,
+            error: 'Chart did not stabilize within timeout (symbol/timeframe may not have applied)',
+          });
+          continue;
+        }
         await new Promise(r => setTimeout(r, delay));
 
         let actionResult;
