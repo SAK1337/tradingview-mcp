@@ -2,16 +2,21 @@
  * Core tab management logic.
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
-import { getClient, evaluate } from '../connection.js';
-
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+import {
+  getClient,
+  evaluate,
+  CDP_HOST,
+  CDP_PORT,
+  fetchWithTimeout,
+  disconnect,
+  reconnect,
+} from '../connection.js';
 
 /**
  * List all open chart tabs (CDP page targets).
  */
 export async function list() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const resp = await fetchWithTimeout(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
 
   const tabs = targets
@@ -31,6 +36,8 @@ export async function list() {
  * Open a new chart tab via keyboard shortcut (Ctrl+T / Cmd+T).
  */
 export async function newTab() {
+  const before = await list();
+
   const c = await getClient();
 
   // Electron/TradingView Desktop uses Ctrl+T for new tab on macOS too
@@ -47,11 +54,25 @@ export async function newTab() {
   });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 't', code: 'KeyT' });
 
-  await new Promise(r => setTimeout(r, 2000));
-
-  // Verify a new tab appeared
-  const state = await list();
+  // Poll the tab list until the count increases (bounded), instead of a fixed sleep.
+  const state = await waitForTabCount(c => c > before.tab_count);
+  if (!state) {
+    throw new Error('New tab did not appear within the expected time');
+  }
   return { success: true, action: 'new_tab_opened', ...state };
+}
+
+/**
+ * Poll list() until predicate(tab_count) is true or attempts are exhausted.
+ * Returns the latest list() state when the predicate matches, otherwise null.
+ */
+async function waitForTabCount(predicate, { attempts = 20, intervalMs = 200 } = {}) {
+  for (let i = 0; i < attempts; i++) {
+    const state = await list();
+    if (predicate(state.tab_count)) return state;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return null;
 }
 
 /**
@@ -76,9 +97,10 @@ export async function closeTab() {
   });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'w', code: 'KeyW' });
 
-  await new Promise(r => setTimeout(r, 1000));
-
-  const after = await list();
+  // Poll the tab list until the count decreases (bounded). If it never changes
+  // within the bound, fall back to the latest observed state (conservative —
+  // a stuck close-confirmation dialog should not throw).
+  const after = (await waitForTabCount(c => c < before.tab_count)) || (await list());
   return { success: true, action: 'tab_closed', tabs_before: before.tab_count, tabs_after: after.tab_count };
 }
 
@@ -95,12 +117,19 @@ export async function switchTab({ index }) {
 
   const target = tabs.tabs[idx];
 
-  // Use CDP Target.activateTarget to bring the tab to front
+  // Bring the tab to the foreground via the CDP HTTP activate endpoint.
   try {
-    const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
-    const text = await resp.text();
-    return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
+    const resp = await fetchWithTimeout(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
+    await resp.text();
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);
   }
+
+  // Activating the tab in the UI does NOT migrate the cached CDP session, which
+  // stays bound to the previous target. Rebuild it against the new target id so
+  // every subsequent tool call (chart_get_state, quote_get, …) hits this tab.
+  await disconnect();
+  await reconnect(target.id);
+
+  return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
 }

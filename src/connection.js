@@ -2,10 +2,25 @@ import CDP from 'chrome-remote-interface';
 
 let client = null;
 let targetInfo = null;
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+export const CDP_HOST = 'localhost';
+export const CDP_PORT = 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
+
+/**
+ * Fetch a URL with a bounded deadline via AbortController.
+ * Aborts (and rejects) if the response does not arrive within `ms`.
+ * The timer is always cleared in finally so it never leaks.
+ */
+export async function fetchWithTimeout(url, ms = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Known direct API paths discovered via live probing (see PROBE_RESULTS.md)
 const KNOWN_PATHS = {
@@ -88,7 +103,7 @@ export async function connect() {
 }
 
 async function findChartTarget() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const resp = await fetchWithTimeout(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
@@ -130,6 +145,29 @@ export async function disconnect() {
     client = null;
     targetInfo = null;
   }
+}
+
+/**
+ * Attach the cached CDP session to a SPECIFIC target id, replacing any current
+ * client. Used by tab switching so subsequent evaluate() calls run against the
+ * newly activated tab rather than the previously bound target.
+ * Closes the existing client first (via disconnect), then enables the required
+ * Runtime/Page/DOM domains on the new attachment.
+ */
+export async function reconnect(targetId) {
+  if (!targetId) {
+    throw new Error('reconnect requires a target id');
+  }
+  await disconnect();
+  client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+
+  // Enable required domains
+  await client.Runtime.enable();
+  await client.Page.enable();
+  await client.DOM.enable();
+
+  targetInfo = { id: targetId };
+  return client;
 }
 
 // --- Direct API path helpers ---
