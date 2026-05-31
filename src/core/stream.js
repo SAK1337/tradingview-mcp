@@ -7,12 +7,30 @@ import { evaluate } from '../connection.js';
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 const MODEL = `${CHART_API}._chartWidget.model()`;
 
+// Backoff / escalation tuning for repeated CDP errors.
+const ERROR_BACKOFF_BASE = 1000;   // first retry delay
+const ERROR_BACKOFF_CAP = 30000;   // max retry delay
+const ERROR_ESCALATE_AFTER = 10;   // consecutive failures before we surface one error
+
+/**
+ * A no-op sink: when a stream is invoked WITHOUT an explicit sink (e.g. from the
+ * MCP stdio path) nothing is written to the process stdio streams, which would
+ * otherwise corrupt the MCP protocol.
+ */
+const NOOP_SINK = { out() {}, err() {} };
+
 /**
  * Generic poll-and-diff loop.
  * Calls fetcher(), compares to last value, emits JSONL on change.
- * Writes to stdout directly for pipe-friendliness.
+ *
+ * Output is routed exclusively through the injected `sink` ({ out, err }). When no
+ * sink is provided it defaults to NOOP_SINK so the function is safe to call off the
+ * CLI path (e.g. the MCP stdio transport). The CLI consumer passes writers backed
+ * by process.stdout/stderr to preserve the pipe-friendly JSONL behaviour.
  */
-async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream' } = {}) {
+async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream', sink } = {}) {
+  const out = sink?.out ?? NOOP_SINK.out;
+  const err = sink?.err ?? NOOP_SINK.err;
   let lastHash = null;
   let running = true;
 
@@ -22,35 +40,46 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
 
   // Emit header with compliance notice
   const start = Date.now();
-  process.stderr.write(`\u26A0  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n`);
-  process.stderr.write(`   Streams from your locally running TradingView Desktop instance only.\n`);
-  process.stderr.write(`   Does not connect to TradingView servers. Requires --remote-debugging-port=9222.\n`);
-  process.stderr.write(`   Ensure your usage complies with TradingView's Terms of Use.\n`);
-  process.stderr.write(`[stream:${label}] started, interval=${interval}ms, Ctrl+C to stop\n`);
+  err(`\u26A0  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n`);
+  err(`   Streams from your locally running TradingView Desktop instance only.\n`);
+  err(`   Does not connect to TradingView servers. Requires --remote-debugging-port=9222.\n`);
+  err(`   Ensure your usage complies with TradingView's Terms of Use.\n`);
+  err(`[stream:${label}] started, interval=${interval}ms, Ctrl+C to stop\n`);
+
+  let consecutiveErrors = 0;
+  let escalated = false;
 
   while (running) {
     try {
       const data = await fetcher();
+      consecutiveErrors = 0;
+      escalated = false;
       if (!data) { await sleep(interval); continue; }
 
       const hash = dedupe ? JSON.stringify(data) : null;
       if (!dedupe || hash !== lastHash) {
         lastHash = hash;
         const line = JSON.stringify({ ...data, _ts: Date.now(), _stream: label });
-        process.stdout.write(line + '\n');
+        out(line + '\n');
       }
-    } catch (err) {
-      // Connection errors — retry silently
-      if (/CDP|ECONNREFUSED/i.test(err.message)) {
-        await sleep(2000);
+    } catch (e) {
+      // Connection errors — back off exponentially instead of retrying silently forever.
+      if (/CDP|ECONNREFUSED/i.test(e.message)) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= ERROR_ESCALATE_AFTER && !escalated) {
+          escalated = true;
+          err(`[stream:${label}] CDP unavailable after ${consecutiveErrors} consecutive attempts: ${e.message}\n`);
+        }
+        const delay = Math.min(ERROR_BACKOFF_BASE * Math.pow(2, consecutiveErrors - 1), ERROR_BACKOFF_CAP);
+        await sleep(delay);
         continue;
       }
-      process.stderr.write(`[stream:${label}] error: ${err.message}\n`);
+      err(`[stream:${label}] error: ${e.message}\n`);
     }
     await sleep(interval);
   }
 
-  process.stderr.write(`[stream:${label}] stopped after ${((Date.now() - start) / 1000).toFixed(1)}s\n`);
+  err(`[stream:${label}] stopped after ${((Date.now() - start) / 1000).toFixed(1)}s\n`);
   process.removeListener('SIGINT', cleanup);
   process.removeListener('SIGTERM', cleanup);
 }
@@ -81,8 +110,8 @@ async function fetchQuote() {
   `);
 }
 
-export async function streamQuote({ interval } = {}) {
-  return pollLoop(fetchQuote, { interval: interval || 300, label: 'quote' });
+export async function streamQuote({ interval, sink } = {}) {
+  return pollLoop(fetchQuote, { interval: interval || 300, label: 'quote', sink });
 }
 
 // ── Stream: ohlcv (last N bars, emits on new bar) ──
@@ -111,8 +140,8 @@ async function fetchLastBar() {
   `);
 }
 
-export async function streamBars({ interval } = {}) {
-  return pollLoop(fetchLastBar, { interval: interval || 500, label: 'bars' });
+export async function streamBars({ interval, sink } = {}) {
+  return pollLoop(fetchLastBar, { interval: interval || 500, label: 'bars', sink });
 }
 
 // ── Stream: indicator values ──
@@ -145,8 +174,8 @@ async function fetchValues() {
   `);
 }
 
-export async function streamValues({ interval } = {}) {
-  return pollLoop(fetchValues, { interval: interval || 500, label: 'values' });
+export async function streamValues({ interval, sink } = {}) {
+  return pollLoop(fetchValues, { interval: interval || 500, label: 'values', sink });
 }
 
 // ── Stream: pine lines ──
@@ -191,8 +220,8 @@ async function fetchLines(studyFilter) {
   `);
 }
 
-export async function streamLines({ interval, filter } = {}) {
-  return pollLoop(() => fetchLines(filter), { interval: interval || 1000, label: 'lines' });
+export async function streamLines({ interval, filter, sink } = {}) {
+  return pollLoop(() => fetchLines(filter), { interval: interval || 1000, label: 'lines', sink });
 }
 
 // ── Stream: pine labels ──
@@ -234,8 +263,8 @@ async function fetchLabels(studyFilter) {
   `);
 }
 
-export async function streamLabels({ interval, filter } = {}) {
-  return pollLoop(() => fetchLabels(filter), { interval: interval || 1000, label: 'labels' });
+export async function streamLabels({ interval, filter, sink } = {}) {
+  return pollLoop(() => fetchLabels(filter), { interval: interval || 1000, label: 'labels', sink });
 }
 
 // ── Stream: pine tables ──
@@ -284,8 +313,8 @@ async function fetchTables(studyFilter) {
   `);
 }
 
-export async function streamTables({ interval, filter } = {}) {
-  return pollLoop(() => fetchTables(filter), { interval: interval || 2000, label: 'tables' });
+export async function streamTables({ interval, filter, sink } = {}) {
+  return pollLoop(() => fetchTables(filter), { interval: interval || 2000, label: 'tables', sink });
 }
 
 // ── Stream: all panes (multi-symbol) ──
@@ -330,6 +359,6 @@ async function fetchAllPanes() {
   `);
 }
 
-export async function streamAllPanes({ interval } = {}) {
-  return pollLoop(fetchAllPanes, { interval: interval || 500, label: 'all-panes' });
+export async function streamAllPanes({ interval, sink } = {}) {
+  return pollLoop(fetchAllPanes, { interval: interval || 500, label: 'all-panes', sink });
 }
