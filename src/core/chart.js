@@ -1,10 +1,19 @@
 /**
  * Core chart control logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite, KNOWN_PATHS } from '../connection.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
 
-const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+const CHART_API = KNOWN_PATHS.chartApi;
+
+// Delay after setSymbol() to let the page-side setSymbol callback fire before we
+// begin polling for chart readiness; matches TV's internal symbol-switch latency.
+const SYMBOL_SWITCH_SETTLE_MS = 500;
+// Studies are added asynchronously — wait for createStudy() to register the new
+// entity before diffing the study list to report the new id.
+const STUDY_ADD_SETTLE_MS = 1500;
+// Allow zoomToBarsRange() to apply before reading back the actual visible range.
+const ZOOM_SETTLE_MS = 500;
 
 function _resolve(deps) {
   return {
@@ -44,7 +53,7 @@ export async function setSymbol({ symbol, _deps }) {
       var chart = ${CHART_API};
       return new Promise(function(resolve) {
         chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
+        setTimeout(resolve, ${SYMBOL_SWITCH_SETTLE_MS});
       });
     })()
   `);
@@ -108,7 +117,7 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
         chart.createStudy(${safeString(indicator)}, false, false, ${JSON.stringify(inputArr)});
       })()
     `);
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, STUDY_ADD_SETTLE_MS));
     const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     const newIds = (after || []).filter(id => !(before || []).includes(id));
     return { success: newIds.length > 0, action: 'add', indicator, entity_id: newIds[0] || null, new_study_count: newIds.length };
@@ -157,7 +166,7 @@ export async function setVisibleRange({ from, to, _deps }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, ZOOM_SETTLE_MS));
   const actual = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -203,7 +212,7 @@ export async function scrollToDate({ date }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, ZOOM_SETTLE_MS));
   return { success: true, date, centered_on: timestamp, resolution, window: { from, to } };
 }
 

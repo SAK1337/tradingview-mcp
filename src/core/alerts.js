@@ -3,6 +3,11 @@
  */
 import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
 
+// Wait for the Create Alert dialog to mount before populating price/message fields.
+const ALERT_DIALOG_OPEN_MS = 1000;
+// Wait after filling fields before clicking Create, so input events settle.
+const ALERT_FIELDS_SETTLE_MS = 500;
+
 export async function create({ condition, price, message }) {
   const opened = await evaluate(`
     (function() {
@@ -19,7 +24,7 @@ export async function create({ condition, price, message }) {
     await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 'a', code: 'KeyA' });
   }
 
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise(r => setTimeout(r, ALERT_DIALOG_OPEN_MS));
 
   const priceSet = await evaluate(`
     (function() {
@@ -58,7 +63,7 @@ export async function create({ condition, price, message }) {
     `);
   }
 
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, ALERT_FIELDS_SETTLE_MS));
   const created = await evaluate(`
     (function() {
       var btns = document.querySelectorAll('button[data-name="submit"], button');

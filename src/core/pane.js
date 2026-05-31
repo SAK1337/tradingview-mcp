@@ -6,6 +6,13 @@ import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
 
+// Wait for setLayout() to rebuild the pane grid before reading it back.
+const LAYOUT_SETTLE_MS = 500;
+// After focusing a pane, wait for it to become the active chart before setSymbol.
+const PANE_FOCUS_SETTLE_MS = 300;
+// Wait after setSymbol() for the page-side callback to fire.
+const SYMBOL_SWITCH_SETTLE_MS = 500;
+
 const LAYOUT_NAMES = {
   's': '1 chart',
   '2h': '2 horizontal',
@@ -97,7 +104,7 @@ export async function setLayout({ layout }) {
   }
 
   await evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, LAYOUT_SETTLE_MS));
 
   const state = await list();
   return {
@@ -139,7 +146,7 @@ export async function setSymbol({ index, symbol }) {
 
   // Focus the target pane first
   await focus({ index: idx });
-  await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, PANE_FOCUS_SETTLE_MS));
 
   // Now set symbol on the now-active chart
   await evaluateAsync(`
@@ -147,7 +154,7 @@ export async function setSymbol({ index, symbol }) {
       var chart = window.TradingViewApi._activeChartWidgetWV.value();
       return new Promise(function(resolve) {
         chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
+        setTimeout(resolve, ${SYMBOL_SWITCH_SETTLE_MS});
       });
     })()
   `);

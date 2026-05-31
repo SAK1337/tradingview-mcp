@@ -54,8 +54,9 @@ const KNOWN_PATHS = {
   layoutManager: 'window.TradingViewApi.getSavedCharts',
   // Phase 5: Symbol search — searchSymbols(query) returns Promise
   symbolSearchApi: 'window.TradingViewApi.searchSymbols',
-  // Phase 6: Pine scripts — REST API at pine-facade.tradingview.com/pine-facade/list/?filter=saved
-  pineFacadeApi: 'https://pine-facade.tradingview.com/pine-facade',
+  // Phase 6: Pine scripts — REST API at pine-facade.tradingview.com/pine-facade/list/?filter=saved.
+  // Overridable via PINE_FACADE_URL for air-gapped / proxied setups (trailing slash trimmed).
+  pineFacadeApi: (process.env.PINE_FACADE_URL || 'https://pine-facade.tradingview.com/pine-facade').replace(/\/+$/, ''),
 };
 
 export { KNOWN_PATHS };

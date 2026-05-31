@@ -4,6 +4,26 @@
  * They throw on error (callers catch and format).
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { pollUntil } from '../wait.js';
+
+// Base URL for the Pine REST facade (compile/translate/list/get/save). Overridable
+// via PINE_FACADE_URL so air-gapped / proxied setups can point at a mirror; defaults
+// to the public TradingView endpoint. Trailing slash is trimmed for safe concat.
+const PINE_FACADE_BASE = (process.env.PINE_FACADE_URL || 'https://pine-facade.tradingview.com/pine-facade').replace(/\/+$/, '');
+
+// How long to wait after clicking compile/add-to-chart before reading markers —
+// gives TV's server-side compile round-trip time to populate Monaco error markers.
+const COMPILE_SETTLE_MS = 2000;
+// smartCompile waits a bit longer: it also checks whether a study was added,
+// which can lag the compile response.
+const SMART_COMPILE_SETTLE_MS = 2500;
+// After dispatching Ctrl+S, wait for the save (or the save-name dialog) to appear.
+const SAVE_SETTLE_MS = 800;
+// After confirming the save-name dialog, wait for it to close.
+const SAVE_DIALOG_SETTLE_MS = 500;
+// Pine editor / Monaco mount poll: up to ~10s (50 × 200ms) for the editor to render.
+const MONACO_POLL_INTERVAL_MS = 200;
+const MONACO_POLL_TIMEOUT_MS = 10000;
 
 // ── Monaco finder (injected into TV page) ──
 const FIND_MONACO = `
@@ -88,16 +108,15 @@ export async function ensurePineEditorOpen() {
     })()
   `);
 
-  for (let i = 0; i < 50; i++) {
-    await new Promise(r => setTimeout(r, 200));
-    // FIND_MONACO starts with a newline, so `return ${FIND_MONACO} !== null`
-    // would trigger Automatic Semicolon Insertion after `return` — the
-    // function would silently return undefined and polling would never
-    // succeed even with the editor fully open. Assign to a var first.
-    const ready = await evaluate(`(function() { var m = ${FIND_MONACO}; return m !== null; })()`);
-    if (ready) return true;
-  }
-  return false;
+  // Poll until Monaco mounts. FIND_MONACO starts with a newline, so
+  // `return ${FIND_MONACO} !== null` would trigger Automatic Semicolon Insertion
+  // after `return` — the function would silently return undefined and polling
+  // would never succeed even with the editor fully open. Assign to a var first.
+  const ready = await pollUntil(
+    () => evaluate(`(function() { var m = ${FIND_MONACO}; return m !== null; })()`),
+    { interval: MONACO_POLL_INTERVAL_MS, timeout: MONACO_POLL_TIMEOUT_MS },
+  );
+  return !!ready;
 }
 
 // ── Pure / offline functions ──
@@ -215,7 +234,7 @@ export async function check({ source }) {
   formData.append('source', source);
 
   const response = await fetch(
-    'https://pine-facade.tradingview.com/pine-facade/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000',
+    `${PINE_FACADE_BASE}/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000`,
     {
       method: 'POST',
       headers: {
@@ -342,7 +361,7 @@ export async function compile() {
     await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
   }
 
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise(r => setTimeout(r, COMPILE_SETTLE_MS));
   return { success: true, button_clicked: clicked || 'keyboard_shortcut', source: 'dom_fallback' };
 }
 
@@ -378,7 +397,7 @@ export async function save() {
   const c = await getClient();
   await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
-  await new Promise(r => setTimeout(r, 800));
+  await new Promise(r => setTimeout(r, SAVE_SETTLE_MS));
 
   // Handle "Save Script" name dialog that appears for new/unsaved scripts
   const dialogHandled = await evaluate(`
@@ -398,7 +417,7 @@ export async function save() {
     })()
   `);
 
-  if (dialogHandled) await new Promise(r => setTimeout(r, 500));
+  if (dialogHandled) await new Promise(r => setTimeout(r, SAVE_DIALOG_SETTLE_MS));
 
   return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
 }
@@ -496,7 +515,7 @@ export async function smartCompile() {
     await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
   }
 
-  await new Promise(r => setTimeout(r, 2500));
+  await new Promise(r => setTimeout(r, SMART_COMPILE_SETTLE_MS));
 
   const errors = await evaluate(`
     (function() {
@@ -570,7 +589,7 @@ export async function openScript({ name }) {
   const result = await evaluateAsync(`
     (function() {
       var target = ${escapedName};
-      return fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
+      return fetch('${PINE_FACADE_BASE}/list/?filter=saved', { credentials: 'include' })
         .then(function(r) { return r.json(); })
         .then(function(scripts) {
           if (!Array.isArray(scripts)) return {error: 'pine-facade returned unexpected data'};
@@ -591,7 +610,7 @@ export async function openScript({ name }) {
 
           var id = match.scriptIdPart;
           var ver = match.version || 1;
-          return fetch('https://pine-facade.tradingview.com/pine-facade/get/' + id + '/' + ver, { credentials: 'include' })
+          return fetch('${PINE_FACADE_BASE}/get/' + id + '/' + ver, { credentials: 'include' })
             .then(function(r2) { return r2.json(); })
             .then(function(data) {
               var source = data.source || '';
@@ -617,7 +636,7 @@ export async function openScript({ name }) {
 
 export async function listScripts() {
   const scripts = await evaluateAsync(`
-    fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
+    fetch('${PINE_FACADE_BASE}/list/?filter=saved', { credentials: 'include' })
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (!Array.isArray(data)) return {scripts: [], error: 'Unexpected response from pine-facade'};

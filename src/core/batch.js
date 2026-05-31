@@ -10,9 +10,15 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
 
+// Default per-symbol settle delay after chart-ready, giving studies/indicators
+// time to finish rendering before the action (screenshot/export) runs.
+const DEFAULT_BATCH_DELAY_MS = 2000;
+// Extra wait for the Strategy Tester report DOM to populate before scraping it.
+const STRATEGY_REPORT_SETTLE_MS = 1000;
+
 export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count }) {
   const tfs = timeframes && timeframes.length > 0 ? timeframes : [null];
-  const delay = delay_ms || 2000;
+  const delay = delay_ms || DEFAULT_BATCH_DELAY_MS;
   const results = [];
 
   let colPath, apiPath;
@@ -56,7 +62,7 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
             })
           `);
         } else if (action === 'get_strategy_results') {
-          await new Promise(r => setTimeout(r, 1000));
+          await new Promise(r => setTimeout(r, STRATEGY_REPORT_SETTLE_MS));
           actionResult = await evaluate(`
             (function() {
               var metrics = {};

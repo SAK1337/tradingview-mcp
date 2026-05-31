@@ -3,6 +3,16 @@
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 
+// Bound the getSavedCharts() callback wait so a never-firing callback can't hang
+// the layout list/switch promise indefinitely.
+const SAVED_CHARTS_TIMEOUT_MS = 5000;
+// After loadChartFromServer(), wait before scanning for an "unsaved changes" dialog.
+const LAYOUT_DIALOG_SETTLE_MS = 500;
+// After dismissing the unsaved-changes dialog, wait for the layout to finish loading.
+const LAYOUT_LOAD_SETTLE_MS = 1000;
+// Gap between the two clicks of a synthesized double-click.
+const DOUBLE_CLICK_GAP_MS = 50;
+
 export async function click({ by, value }) {
   const escaped = JSON.stringify(value);
   const result = await evaluate(`
@@ -127,7 +137,7 @@ export async function layoutList() {
           var result = charts.map(function(c) { return { id: c.id || c.chartId || null, name: c.name || c.title || 'Untitled', symbol: c.symbol || null, resolution: c.resolution || null, modified: c.timestamp || c.modified || null }; });
           resolve({layouts: result, source: 'internal_api'});
         });
-        setTimeout(function() { resolve({layouts: [], source: 'internal_api', error: 'getSavedCharts timed out'}); }, 5000);
+        setTimeout(function() { resolve({layouts: [], source: 'internal_api', error: 'getSavedCharts timed out'}); }, ${SAVED_CHARTS_TIMEOUT_MS});
       } catch(e) { resolve({layouts: [], source: 'internal_api', error: e.message}); }
     })
   `);
@@ -151,14 +161,14 @@ export async function layoutSwitch({ name }) {
           window.TradingViewApi.loadChartFromServer(chartId);
           resolve({success: true, method: 'loadChartFromServer', id: chartId, name: match.name || match.title, source: 'internal_api'});
         });
-        setTimeout(function() { resolve({success: false, error: 'getSavedCharts timed out', source: 'internal_api'}); }, 5000);
+        setTimeout(function() { resolve({success: false, error: 'getSavedCharts timed out', source: 'internal_api'}); }, ${SAVED_CHARTS_TIMEOUT_MS});
       } catch(e) { resolve({success: false, error: e.message, source: 'internal_api'}); }
     })
   `);
   if (!result?.success) throw new Error(result?.error || 'Unknown error switching layout');
 
   // Handle "unsaved changes" confirmation dialog
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, LAYOUT_DIALOG_SETTLE_MS));
   const dismissed = await evaluate(`
     (function() {
       var btns = document.querySelectorAll('button');
@@ -173,7 +183,7 @@ export async function layoutSwitch({ name }) {
     })()
   `);
 
-  if (dismissed) await new Promise(r => setTimeout(r, 1000));
+  if (dismissed) await new Promise(r => setTimeout(r, LAYOUT_LOAD_SETTLE_MS));
   return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dismissed };
 }
 
@@ -259,7 +269,7 @@ export async function mouseClick({ x, y, button, double_click }) {
   await c.Input.dispatchMouseEvent({ type: 'mousePressed', x, y, button: btn, buttons: btnNum, clickCount: 1 });
   await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x, y, button: btn });
   if (double_click) {
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, DOUBLE_CLICK_GAP_MS));
     await c.Input.dispatchMouseEvent({ type: 'mousePressed', x, y, button: btn, buttons: btnNum, clickCount: 2 });
     await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x, y, button: btn });
   }

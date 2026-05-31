@@ -3,6 +3,23 @@ import { evaluate } from './connection.js';
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
 
+/**
+ * Generic poll-until helper.
+ * Repeatedly invokes `predicate()` (which may be async) every `interval` ms until
+ * it returns a truthy value or `timeout` ms elapse. Resolves to the truthy value
+ * on success, or `null` on timeout. Used to replace hand-rolled polling loops.
+ */
+export async function pollUntil(predicate, { interval = 200, timeout = 10000 } = {}) {
+  const start = Date.now();
+  // Evaluate at least once, then keep polling while inside the time budget.
+  for (;;) {
+    const value = await predicate();
+    if (value) return value;
+    if (Date.now() - start >= timeout) return null;
+    await new Promise(r => setTimeout(r, interval));
+  }
+}
+
 export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT) {
   const start = Date.now();
   let lastBarCount = -1;
