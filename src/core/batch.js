@@ -86,7 +86,7 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
             })()
           `);
         } else {
-          actionResult = { error: 'Unknown action or API not available: ' + action };
+          throw new Error('Unknown action or API not available: ' + action);
         }
         results.push({ ...combo, success: true, result: actionResult });
       } catch (err) {
@@ -96,5 +96,6 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
   }
 
   const successCount = results.filter(r => r.success).length;
-  return { success: true, total_iterations: results.length, successful: successCount, failed: results.length - successCount, results };
+  const failedCount = results.length - successCount;
+  return { success: failedCount === 0, total_iterations: results.length, successful: successCount, failed: failedCount, results };
 }

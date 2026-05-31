@@ -15,13 +15,16 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
       var model = chart.model();
       var sources = model.model().dataSources();
       var results = [];
+      var warnings = [];
       var filter = ${safeString(filter || '')};
       for (var si = 0; si < sources.length; si++) {
         var s = sources[si];
         if (!s.metaInfo) continue;
+        var sName = '';
         try {
           var meta = s.metaInfo();
           var name = meta.description || meta.shortDescription || '';
+          sName = name;
           if (!name) continue;
           if (filter && name.indexOf(filter) === -1) continue;
           var g = s._graphics;
@@ -39,7 +42,7 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
                 }
               }
             }
-          } catch(e) {}
+          } catch(e) { warnings.push({study: name, reason: 'primitives parse failed: ' + (e && e.message ? e.message : String(e))}); }
           if (items.length === 0 && '${collectionName}' === 'dwgtablecells') {
             try {
               var tcOuter = pc.dwgtablecells;
@@ -49,35 +52,35 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
                   tcColl._primitivesDataById.forEach(function(v, id) { items.push({id: id, raw: v}); });
                 }
               }
-            } catch(e) {}
+            } catch(e) { warnings.push({study: name, reason: 'tableCells parse failed: ' + (e && e.message ? e.message : String(e))}); }
           }
           if (items.length > 0) results.push({name: name, count: items.length, items: items});
-        } catch(e) {}
+        } catch(e) { warnings.push({study: sName || 'unknown', reason: 'study scan failed: ' + (e && e.message ? e.message : String(e))}); }
       }
-      return results;
+      return { results: results, warnings: warnings };
     })()
   `;
 }
 
 export async function getOhlcv({ count, summary } = {}) {
   const limit = Math.min(count || 100, MAX_OHLCV_BARS);
-  let data;
-  try {
-    data = await evaluate(`
-      (function() {
-        var bars = ${BARS_PATH};
-        if (!bars || typeof bars.lastIndex !== 'function') return null;
-        var result = [];
-        var end = bars.lastIndex();
-        var start = Math.max(bars.firstIndex(), end - ${limit} + 1);
-        for (var i = start; i <= end; i++) {
-          var v = bars.valueAt(i);
-          if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
-        }
-        return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
-      })()
-    `);
-  } catch { data = null; }
+  // Let evaluate() errors (CDP drop, moved API path, page error) propagate so
+  // the real cause reaches the caller. The "chart may still be loading" hint is
+  // reserved for the case where extraction SUCCEEDED but returned no bars.
+  const data = await evaluate(`
+    (function() {
+      var bars = ${BARS_PATH};
+      if (!bars || typeof bars.lastIndex !== 'function') return null;
+      var result = [];
+      var end = bars.lastIndex();
+      var start = Math.max(bars.firstIndex(), end - ${limit} + 1);
+      for (var i = start; i <= end; i++) {
+        var v = bars.valueAt(i);
+        if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
+      }
+      return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
+    })()
+  `);
 
   if (!data || !data.bars || data.bars.length === 0) {
     throw new Error('Could not extract OHLCV data. The chart may still be loading.');
@@ -157,17 +160,29 @@ export async function getIndicator({ entity_id }) {
   return { success: true, entity_id, name: data?.name, visible: data?.visible, inputs };
 }
 
-export async function getStrategyResults() {
-  const results = await evaluate(`
-    (function() {
-      try {
+/**
+ * Returns a JS snippet (statements, not an expression) that scans the active
+ * chart's data sources for a strategy object and assigns it to `var strat`.
+ * `predicate` is a JS boolean expression over a candidate source `s` selecting
+ * which strategy-bearing fields qualify (e.g. 's.reportData || s.performance').
+ * Shared by getStrategyResults/getTrades/getEquity so the scan lives in one place.
+ */
+export function findStrategy(predicate) {
+  return `
         var chart = ${CHART_API}._chartWidget;
         var sources = chart.model().model().dataSources();
         var strat = null;
         for (var i = 0; i < sources.length; i++) {
           var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
-        }
+          if (s.metaInfo && s.metaInfo().is_price_study === false && (${predicate})) { strat = s; break; }
+        }`;
+}
+
+export async function getStrategyResults() {
+  const results = await evaluate(`
+    (function() {
+      try {
+        ${findStrategy('s.reportData || s.performance')}
         if (!strat) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy indicator first.'};
         var metrics = {};
         if (strat.reportData) {
@@ -186,7 +201,8 @@ export async function getStrategyResults() {
       } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {}, error: results?.error };
+  if (results?.error) throw new Error(results.error);
+  return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {} };
 }
 
 export async function getTrades({ max_trades } = {}) {
@@ -194,13 +210,7 @@ export async function getTrades({ max_trades } = {}) {
   const trades = await evaluate(`
     (function() {
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.ordersData || s.reportData)) { strat = s; break; }
-        }
+        ${findStrategy('s.ordersData || s.reportData')}
         if (!strat) return {trades: [], source: 'internal_api', error: 'No strategy found on chart.'};
         var orders = null;
         if (strat.ordersData) { orders = typeof strat.ordersData === 'function' ? strat.ordersData() : strat.ordersData; if (orders && typeof orders.value === 'function') orders = orders.value(); }
@@ -223,20 +233,15 @@ export async function getTrades({ max_trades } = {}) {
       } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
+  if (trades?.error) throw new Error(trades.error);
+  return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [] };
 }
 
 export async function getEquity() {
   const equity = await evaluate(`
     (function() {
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
-        }
+        ${findStrategy('s.reportData || s.performance')}
         if (!strat) return {data: [], source: 'internal_api', error: 'No strategy found on chart.'};
         var data = [];
         if (strat.equityData) {
@@ -264,7 +269,8 @@ export async function getEquity() {
       } catch(e) { return {data: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
+  if (equity?.error) throw new Error(equity.error);
+  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note };
 }
 
 export async function getQuote({ symbol } = {}) {
@@ -410,8 +416,10 @@ export async function getStudyValues() {
 
 export async function getPineLines({ study_filter, verbose } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const payload = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
+  const raw = payload?.results || [];
+  const warnings = payload?.warnings || [];
+  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
 
   const studies = raw.map(s => {
     const hLevels = [];
@@ -429,13 +437,15 @@ export async function getPineLines({ study_filter, verbose } = {}) {
     if (verbose) result.all_lines = allLines;
     return result;
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
 export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const payload = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
+  const raw = payload?.results || [];
+  const warnings = payload?.warnings || [];
+  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
 
   const limit = max_labels || 50;
   const studies = raw.map(s => {
@@ -449,13 +459,15 @@ export async function getPineLabels({ study_filter, max_labels, verbose } = {}) 
     if (labels.length > limit) labels = labels.slice(-limit);
     return { name: s.name, total_labels: s.count, showing: labels.length, labels };
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
 export async function getPineTables({ study_filter } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const payload = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
+  const raw = payload?.results || [];
+  const warnings = payload?.warnings || [];
+  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
 
   const studies = raw.map(s => {
     const tables = {};
@@ -477,13 +489,15 @@ export async function getPineTables({ study_filter } = {}) {
     });
     return { name: s.name, tables: tableList };
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
 export async function getPineBoxes({ study_filter, verbose } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const payload = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
+  const raw = payload?.results || [];
+  const warnings = payload?.warnings || [];
+  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
 
   const studies = raw.map(s => {
     const zones = [];
@@ -501,5 +515,5 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
     if (verbose) result.all_boxes = allBoxes;
     return result;
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }

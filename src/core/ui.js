@@ -141,7 +141,8 @@ export async function layoutList() {
       } catch(e) { resolve({layouts: [], source: 'internal_api', error: e.message}); }
     })
   `);
-  return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [], error: layouts?.error };
+  if (layouts?.error) throw new Error(layouts.error);
+  return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [] };
 }
 
 export async function layoutSwitch({ name }) {

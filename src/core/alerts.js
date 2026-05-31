@@ -74,7 +74,8 @@ export async function create({ condition, price, message }) {
     })()
   `);
 
-  return { success: !!created, price, condition, message: message || '(none)', price_set: !!priceSet, source: 'dom_fallback' };
+  if (!created) throw new Error('Could not find Create button in alert dialog');
+  return { success: true, price, condition, message: message || '(none)', price_set: !!priceSet, source: 'dom_fallback' };
 }
 
 export async function list() {
@@ -108,7 +109,7 @@ export async function list() {
   return { success: true, alert_count: result?.alerts?.length || 0, source: 'internal_api', alerts: result?.alerts || [], error: result?.error };
 }
 
-export async function deleteAlerts({ delete_all }) {
+export async function deleteAlerts({ delete_all = false } = {}) {
   if (delete_all) {
     const result = await evaluate(`
       (function() {
@@ -124,5 +125,5 @@ export async function deleteAlerts({ delete_all }) {
     `);
     return { success: true, note: 'Alert deletion requires manual confirmation in the context menu.', context_menu_opened: result?.context_menu_opened || false, source: 'dom_fallback' };
   }
-  throw new Error('Individual alert deletion not yet supported. Use delete_all: true.');
+  return { success: false, error: 'Individual alert deletion not supported; pass delete_all:true' };
 }
