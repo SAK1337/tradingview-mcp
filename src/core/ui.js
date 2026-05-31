@@ -1,7 +1,47 @@
 /**
  * Core UI automation logic.
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
+
+/**
+ * Page-side helper source: given a CSS attribute value, return it escaped for safe
+ * embedding inside a double-quoted attribute selector ([attr="<value>"]). Backslashes
+ * are doubled first, then double-quotes escaped. Defined as a string so it can be
+ * inlined into evaluated payloads. The VALUE itself always reaches the page via
+ * safeString() (a JS string literal), so it can never break out of the evaluate
+ * payload; this only guards against the value terminating the CSS selector.
+ */
+const ATTR_ESCAPE_FN = `function __escAttr(v){return String(v).replace(/\\\\/g,'\\\\\\\\').replace(/"/g,'\\\\"');}`;
+
+/**
+ * Map a keyboard key name to its DOM `code` and Windows virtual-key code.
+ * Pure + exported for unit testing. Returns null for keys outside the supported
+ * set (named keys in KEY_MAP, single letters a-z/A-Z, single digits 0-9) so the
+ * caller can reject clearly-unsupported keys instead of dispatching a wrong code.
+ */
+const KEY_MAP = {
+  'Enter': { code: 'Enter', vk: 13 }, 'Escape': { code: 'Escape', vk: 27 }, 'Tab': { code: 'Tab', vk: 9 },
+  'Backspace': { code: 'Backspace', vk: 8 }, 'Delete': { code: 'Delete', vk: 46 },
+  'ArrowUp': { code: 'ArrowUp', vk: 38 }, 'ArrowDown': { code: 'ArrowDown', vk: 40 },
+  'ArrowLeft': { code: 'ArrowLeft', vk: 37 }, 'ArrowRight': { code: 'ArrowRight', vk: 39 },
+  'Space': { code: 'Space', vk: 32 }, 'Home': { code: 'Home', vk: 36 }, 'End': { code: 'End', vk: 35 },
+  'PageUp': { code: 'PageUp', vk: 33 }, 'PageDown': { code: 'PageDown', vk: 34 },
+  'F1': { code: 'F1', vk: 112 }, 'F2': { code: 'F2', vk: 113 }, 'F3': { code: 'F3', vk: 114 },
+  'F4': { code: 'F4', vk: 115 }, 'F5': { code: 'F5', vk: 116 }, 'F6': { code: 'F6', vk: 117 },
+  'F7': { code: 'F7', vk: 118 }, 'F8': { code: 'F8', vk: 119 }, 'F9': { code: 'F9', vk: 120 },
+  'F10': { code: 'F10', vk: 121 }, 'F11': { code: 'F11', vk: 122 }, 'F12': { code: 'F12', vk: 123 },
+};
+
+export function mapKey(key) {
+  if (typeof key !== 'string' || key.length === 0) return null;
+  if (KEY_MAP[key]) return KEY_MAP[key];
+  if (/^[0-9]$/.test(key)) return { code: 'Digit' + key, vk: key.charCodeAt(0) };
+  if (/^[a-zA-Z]$/.test(key)) {
+    const upper = key.toUpperCase();
+    return { code: 'Key' + upper, vk: upper.charCodeAt(0) };
+  }
+  return null;
+}
 
 // Bound the getSavedCharts() callback wait so a never-firing callback can't hang
 // the layout list/switch promise indefinitely.
@@ -14,21 +54,24 @@ const LAYOUT_LOAD_SETTLE_MS = 1000;
 const DOUBLE_CLICK_GAP_MS = 50;
 
 export async function click({ by, value }) {
-  const escaped = JSON.stringify(value);
+  // The value reaches the page only via safeString() (a JS string literal) — it
+  // can never terminate the evaluate payload. __escAttr() then escapes it for the
+  // CSS attribute selector so it can't break out of the selector either.
   const result = await evaluate(`
     (function() {
-      var by = ${JSON.stringify(by)};
-      var value = ${escaped};
+      ${ATTR_ESCAPE_FN}
+      var by = ${safeString(by)};
+      var value = ${safeString(value)};
       var el = null;
-      if (by === 'aria-label') el = document.querySelector('[aria-label="' + value.replace(/"/g, '\\\\"') + '"]');
-      else if (by === 'data-name') el = document.querySelector('[data-name="' + value.replace(/"/g, '\\\\"') + '"]');
+      if (by === 'aria-label') el = document.querySelector('[aria-label="' + __escAttr(value) + '"]');
+      else if (by === 'data-name') el = document.querySelector('[data-name="' + __escAttr(value) + '"]');
       else if (by === 'text') {
         var candidates = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"]');
         for (var i = 0; i < candidates.length; i++) {
           var text = candidates[i].textContent.trim();
           if (text === value || text.toLowerCase() === value.toLowerCase()) { el = candidates[i]; break; }
         }
-      } else if (by === 'class-contains') el = document.querySelector('[class*="' + value.replace(/"/g, '\\\\"') + '"]');
+      } else if (by === 'class-contains') el = document.querySelector('[class*="' + __escAttr(value) + '"]');
       if (!el) return { found: false };
       el.click();
       return { found: true, tag: el.tagName.toLowerCase(), text: (el.textContent || '').trim().substring(0, 80), aria_label: el.getAttribute('aria-label') || null, data_name: el.getAttribute('data-name') || null };
@@ -197,16 +240,13 @@ export async function keyboard({ key, modifiers }) {
     if (modifiers.includes('meta')) mod |= 4;
     if (modifiers.includes('shift')) mod |= 8;
   }
-  const keyMap = {
-    'Enter': { code: 'Enter', vk: 13 }, 'Escape': { code: 'Escape', vk: 27 }, 'Tab': { code: 'Tab', vk: 9 },
-    'Backspace': { code: 'Backspace', vk: 8 }, 'Delete': { code: 'Delete', vk: 46 },
-    'ArrowUp': { code: 'ArrowUp', vk: 38 }, 'ArrowDown': { code: 'ArrowDown', vk: 40 },
-    'ArrowLeft': { code: 'ArrowLeft', vk: 37 }, 'ArrowRight': { code: 'ArrowRight', vk: 39 },
-    'Space': { code: 'Space', vk: 32 }, 'Home': { code: 'Home', vk: 36 }, 'End': { code: 'End', vk: 35 },
-    'PageUp': { code: 'PageUp', vk: 33 }, 'PageDown': { code: 'PageDown', vk: 34 },
-    'F1': { code: 'F1', vk: 112 }, 'F2': { code: 'F2', vk: 113 }, 'F5': { code: 'F5', vk: 116 },
-  };
-  const mapped = keyMap[key] || { code: 'Key' + key.toUpperCase(), vk: key.toUpperCase().charCodeAt(0) };
+  const mapped = mapKey(key);
+  if (!mapped) {
+    throw new Error(
+      `Unsupported key: "${key}". Use a named key (Enter, Escape, Tab, Arrow*, F1-F12, etc.), ` +
+      `a single letter (a-z), or a single digit (0-9).`
+    );
+  }
   await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: mod, key, code: mapped.code, windowsVirtualKeyCode: mapped.vk });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key, code: mapped.code });
   return { success: true, key, modifiers: modifiers || [] };
@@ -221,18 +261,19 @@ export async function typeText({ text }) {
 export async function hover({ by, value }) {
   const coords = await evaluate(`
     (function() {
-      var by = ${JSON.stringify(by)};
-      var value = ${JSON.stringify(value)};
+      ${ATTR_ESCAPE_FN}
+      var by = ${safeString(by)};
+      var value = ${safeString(value)};
       var el = null;
       if (by === 'aria-label') {
-        el = document.querySelector('[aria-label="' + value.replace(/"/g, '\\\\"') + '"]');
-        if (!el) el = document.querySelector('[aria-label*="' + value.replace(/"/g, '\\\\"') + '"]');
+        el = document.querySelector('[aria-label="' + __escAttr(value) + '"]');
+        if (!el) el = document.querySelector('[aria-label*="' + __escAttr(value) + '"]');
       }
-      else if (by === 'data-name') el = document.querySelector('[data-name="' + value.replace(/"/g, '\\\\"') + '"]');
+      else if (by === 'data-name') el = document.querySelector('[data-name="' + __escAttr(value) + '"]');
       else if (by === 'text') {
         var candidates = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"], span, div');
         for (var i = 0; i < candidates.length; i++) { var text = candidates[i].textContent.trim(); if (text === value || text.toLowerCase() === value.toLowerCase()) { el = candidates[i]; break; } }
-      } else if (by === 'class-contains') el = document.querySelector('[class*="' + value.replace(/"/g, '\\\\"') + '"]');
+      } else if (by === 'class-contains') el = document.querySelector('[class*="' + __escAttr(value) + '"]');
       if (!el) return null;
       var rect = el.getBoundingClientRect();
       return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: el.tagName.toLowerCase() };
@@ -281,17 +322,21 @@ export async function findElement({ query, strategy }) {
   const strat = strategy || 'text';
   const results = await evaluate(`
     (function() {
-      var query = ${JSON.stringify(query)};
-      var strategy = ${JSON.stringify(strat)};
+      ${ATTR_ESCAPE_FN}
+      var query = ${safeString(query)};
+      var strategy = ${safeString(strat)};
       var results = [];
       if (strategy === 'css') {
+        // 'css' strategy intentionally treats query as a raw CSS selector. The
+        // value still reaches the page only via safeString() so it cannot break
+        // out of the evaluate payload; an invalid selector simply throws below.
         var els = document.querySelectorAll(query);
         for (var i = 0; i < Math.min(els.length, 20); i++) {
           var rect = els[i].getBoundingClientRect();
           results.push({ tag: els[i].tagName.toLowerCase(), text: (els[i].textContent || '').trim().substring(0, 80), aria_label: els[i].getAttribute('aria-label') || null, data_name: els[i].getAttribute('data-name') || null, x: rect.x, y: rect.y, width: rect.width, height: rect.height, visible: els[i].offsetParent !== null });
         }
       } else if (strategy === 'aria-label') {
-        var els = document.querySelectorAll('[aria-label*="' + query.replace(/"/g, '\\\\"') + '"]');
+        var els = document.querySelectorAll('[aria-label*="' + __escAttr(query) + '"]');
         for (var i = 0; i < Math.min(els.length, 20); i++) {
           var rect = els[i].getBoundingClientRect();
           results.push({ tag: els[i].tagName.toLowerCase(), text: (els[i].textContent || '').trim().substring(0, 80), aria_label: els[i].getAttribute('aria-label') || null, data_name: els[i].getAttribute('data-name') || null, x: rect.x, y: rect.y, width: rect.width, height: rect.height, visible: els[i].offsetParent !== null });

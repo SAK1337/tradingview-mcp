@@ -1,12 +1,12 @@
 /**
  * Core indicator settings logic.
  */
-import { evaluate, safeString, KNOWN_PATHS } from '../connection.js';
+import { evaluate, safeString, parseJsonArg, KNOWN_PATHS } from '../connection.js';
 
 const CHART_API = KNOWN_PATHS.chartApi;
 
 export async function setInputs({ entity_id, inputs: inputsRaw }) {
-  const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  const inputs = parseJsonArg(inputsRaw, 'inputs');
   if (!entity_id) throw new Error('entity_id is required. Use chart_get_state to find study IDs.');
   if (!inputs || typeof inputs !== 'object' || Object.keys(inputs).length === 0) {
     throw new Error('inputs must be a non-empty object, e.g. { length: 50 }');

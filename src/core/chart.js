@@ -1,7 +1,7 @@
 /**
  * Core chart control logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite, KNOWN_PATHS } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite, parseJsonArg, KNOWN_PATHS } from '../connection.js';
 import { waitForChartReady as _waitForChartReady, pollUntil as _pollUntil } from '../wait.js';
 
 const CHART_API = KNOWN_PATHS.chartApi;
@@ -114,7 +114,7 @@ export async function setType({ chart_type, _deps }) {
 
 export async function manageIndicator({ action, indicator, entity_id, inputs: inputsRaw, _deps }) {
   const { evaluate, pollUntil } = _resolve(_deps);
-  const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  const inputs = parseJsonArg(inputsRaw, 'inputs');
 
   if (action === 'add') {
     // TradingView's createStudy expects `inputs` as a POSITIONAL array of
@@ -123,12 +123,30 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
     // wired to the calculation engine — the study runs with default values
     // while properties() reports the requested override, producing
     // identical-looking-but-wrong series across multiple studies of the
-    // same type. Accept either an array (passed positionally) or an object
-    // (insertion-order values used as positional, since for the canonical
-    // length-first MA family this matches declaration order).
+    // same type.
+    //
+    // Object inputs are inherently positionally ambiguous at add-time: the
+    // study's declared input order is only readable from its metaInfo AFTER
+    // the study is created, so we cannot reliably map a multi-key object to
+    // the correct positional slots before calling createStudy(). We therefore:
+    //   - accept arrays verbatim (already positional → exact), and
+    //   - accept a SINGLE-key object (unambiguous — one value, one slot), but
+    //   - REJECT multi-key objects with actionable guidance to pass an array,
+    //     rather than silently permuting positional inputs via Object.values.
     let inputArr = [];
-    if (Array.isArray(inputs)) inputArr = inputs;
-    else if (inputs && typeof inputs === 'object') inputArr = Object.values(inputs);
+    if (Array.isArray(inputs)) {
+      inputArr = inputs;
+    } else if (inputs && typeof inputs === 'object') {
+      const keys = Object.keys(inputs);
+      if (keys.length > 1) {
+        throw new Error(
+          `Ambiguous indicator inputs: an object with multiple keys (${keys.join(', ')}) ` +
+          `cannot be mapped to the study's declared positional input order at add-time. ` +
+          `Pass inputs as an ordered array of values instead (e.g. [20, "close"]).`
+        );
+      }
+      inputArr = Object.values(inputs);
+    }
     const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     await evaluate(`
       (function() {

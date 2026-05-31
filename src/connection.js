@@ -71,6 +71,24 @@ export function safeString(str) {
 }
 
 /**
+ * Parse a caller-supplied JSON string defensively. If `raw` is already an object
+ * it is returned as-is; if it is a string it is JSON.parsed inside a try/catch so a
+ * malformed payload yields a friendly Error (with a short preview of the bad input)
+ * instead of a raw SyntaxError propagating uncaught. `label` names the field
+ * (e.g. "inputs", "overrides") in the error message.
+ */
+export function parseJsonArg(raw, label = 'value') {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const preview = raw.length > 50 ? raw.slice(0, 50) + '…' : raw;
+    throw new Error(`${label} must be valid JSON; got: ${preview}`);
+  }
+}
+
+/**
  * Validate that a value is a finite number. Throws if NaN, Infinity, or non-numeric.
  * Prevents corrupt values from reaching TradingView APIs that persist to cloud state.
  */

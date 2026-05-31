@@ -89,7 +89,7 @@ export async function run(argv) {
         args: args.slice(2),
         options: { help: { type: 'boolean', short: 'h' }, ...options },
         allowPositionals: true,
-        strict: false,
+        strict: true,
       });
       if (values.help) {
         console.log(`Usage: tv ${cmdName} ${subName} [options]\n`);
@@ -115,7 +115,7 @@ export async function run(argv) {
         args: args.slice(1),
         options: { help: { type: 'boolean', short: 'h' }, ...options },
         allowPositionals: true,
-        strict: false,
+        strict: true,
       });
       if (values.help) {
         printCommandHelp(cmdName, cmd);

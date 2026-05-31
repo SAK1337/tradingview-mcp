@@ -15,8 +15,32 @@ const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
 const DEFAULT_BATCH_DELAY_MS = 2000;
 // Extra wait for the Strategy Tester report DOM to populate before scraping it.
 const STRATEGY_REPORT_SETTLE_MS = 1000;
+// Defense-in-depth cap on total work: symbols × timeframes. The MCP schema caps
+// symbols ≤ 20 and timeframes ≤ 10 individually, but a 20×10 sweep with the 2s
+// default delay would still block for minutes and write 200 screenshots. Reject
+// oversized sweeps up front rather than starting an unbounded loop.
+export const MAX_BATCH_ITERATIONS = 50;
+
+/**
+ * Validate the total iteration count (symbols × timeframes) against
+ * MAX_BATCH_ITERATIONS. Pure + exported so the cap is unit-testable offline.
+ * Throws a clear Error when exceeded.
+ */
+export function assertBatchSize(symbols, timeframes) {
+  const symCount = Array.isArray(symbols) ? symbols.length : 0;
+  const tfCount = (Array.isArray(timeframes) && timeframes.length > 0) ? timeframes.length : 1;
+  const total = symCount * tfCount;
+  if (total > MAX_BATCH_ITERATIONS) {
+    throw new Error(
+      `Batch too large: ${symCount} symbols × ${tfCount} timeframes = ${total} iterations ` +
+      `exceeds the maximum of ${MAX_BATCH_ITERATIONS}. Reduce symbols or timeframes.`
+    );
+  }
+  return total;
+}
 
 export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count }) {
+  assertBatchSize(symbols, timeframes);
   const tfs = timeframes && timeframes.length > 0 ? timeframes : [null];
   const delay = delay_ms || DEFAULT_BATCH_DELAY_MS;
   const results = [];
