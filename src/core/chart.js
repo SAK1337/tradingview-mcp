@@ -89,7 +89,18 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
 
   if (action === 'add') {
-    const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];
+    // TradingView's createStudy expects `inputs` as a POSITIONAL array of
+    // values, matching the study's declared input order. The {id, value}
+    // shape (used by Pine's applyOverrides) is silently accepted but never
+    // wired to the calculation engine — the study runs with default values
+    // while properties() reports the requested override, producing
+    // identical-looking-but-wrong series across multiple studies of the
+    // same type. Accept either an array (passed positionally) or an object
+    // (insertion-order values used as positional, since for the canonical
+    // length-first MA family this matches declaration order).
+    let inputArr = [];
+    if (Array.isArray(inputs)) inputArr = inputs;
+    else if (inputs && typeof inputs === 'object') inputArr = Object.values(inputs);
     const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     await evaluate(`
       (function() {

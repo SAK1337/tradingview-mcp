@@ -40,34 +40,61 @@ const FIND_MONACO = `
  * Returns true if editor is accessible, false on timeout.
  */
 export async function ensurePineEditorOpen() {
+  // Short-circuit: editor already rendered AND bottom panel visible.
+  // Monaco can be present in the DOM while the bottom panel is minimized
+  // (height 0), in which case clicks on the editor's toolbar buttons no-op,
+  // so we also require the panel to be in a visible mode before returning.
   const already = await evaluate(`
     (function() {
       var m = ${FIND_MONACO};
-      return m !== null;
+      if (m === null) return false;
+      var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+      if (!bwb) return true;
+      var visible = bwb.isVisible && bwb.isVisible().value && bwb.isVisible().value();
+      var mode = bwb._mode && bwb._mode.value && bwb._mode.value();
+      return visible !== false && mode !== 'minimized';
     })()
   `);
   if (already) return true;
 
+  // Two cases to handle:
+  //   (a) Pine Editor was never opened in this session — Monaco isn't in
+  //       the DOM yet. We need to click the Pine toolbar button to activate
+  //       the tab, which mounts Monaco.
+  //   (b) Pine Editor was previously opened but the bottom panel is now
+  //       minimized — Monaco is already in the DOM. We must NOT click the
+  //       Pine button again: when Pine is already the active tab, the
+  //       button toggles the panel off (closing Pine).
+  // In both cases we then un-minimize / un-hide the panel so that the
+  // editor's toolbar buttons (compile/save) are clickable.
+  //
+  // The internal bottomWidgetBar methods (open/show/hide/close) only operate
+  // on already-active widgets — they can't switch tabs or activate Pine from
+  // scratch — and the older activateScriptEditorTab/showWidget methods don't
+  // exist on current TV builds, so the DOM click is unavoidable for case (a).
   await evaluate(`
     (function() {
+      var monacoMounted = !!document.querySelector('.monaco-editor.pine-editor-monaco');
+      if (!monacoMounted) {
+        var btn = document.querySelector('[data-name="pine-dialog-button"]')
+          || document.querySelector('[aria-label="Pine"]');
+        if (btn) btn.click();
+      }
       var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-      if (!bwb) return;
-      if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab();
-      else if (typeof bwb.showWidget === 'function') bwb.showWidget('pine-editor');
-    })()
-  `);
-
-  await evaluate(`
-    (function() {
-      var btn = document.querySelector('[aria-label="Pine"]')
-        || document.querySelector('[data-name="pine-dialog-button"]');
-      if (btn) btn.click();
+      if (bwb) {
+        if (bwb._mode && bwb._mode.value && bwb._mode.value() === 'minimized' && bwb._mode.setValue) bwb._mode.setValue('normal');
+        if (bwb._isHidden && bwb._isHidden.setValue) bwb._isHidden.setValue(false);
+      }
     })()
   `);
 
   for (let i = 0; i < 50; i++) {
     await new Promise(r => setTimeout(r, 200));
-    const ready = await evaluate(`(function() { return ${FIND_MONACO} !== null; })()`);
+    // FIND_MONACO starts with a newline, so `return ${FIND_MONACO} !== null`
+    // would trigger Automatic Semicolon Insertion after `return` — the
+    // function would silently return undefined and polling would never
+    // succeed even with the editor fully open. Assign to a var first.
+    const ready = await evaluate(`(function() { var m = ${FIND_MONACO}; return m !== null; })()`);
     if (ready) return true;
   }
   return false;

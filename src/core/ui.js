@@ -31,25 +31,42 @@ export async function click({ by, value }) {
 export async function openPanel({ panel, action }) {
   const isBottomPanel = panel === 'pine-editor' || panel === 'strategy-tester';
   if (isBottomPanel) {
-    const widgetName = panel === 'pine-editor' ? 'pine-editor' : 'backtesting';
+    // Bottom panels (Pine Editor, Strategy Tester) live in bottomWidgetBar.
+    // Current TV builds expose open/close/show/hide/toggleMinimize/
+    // toggleMaximize on bwb, but the older showWidget/hideWidget/
+    // activateScriptEditorTab methods this file used to call don't exist.
+    // To switch tabs we click the toolbar button (same path the user takes);
+    // to hide/show we minimize via _mode.setValue, which actually drives the
+    // panel layout (bwb.hide() only un-shows already-active widgets and
+    // doesn't collapse the panel).
+    const btnSelector = panel === 'pine-editor'
+      ? '[data-name="pine-dialog-button"]'
+      : '[data-name="backtesting-button"]';
+    const ariaLabel = panel === 'pine-editor' ? 'Pine' : 'Strategy Tester';
+    const monacoSelector = panel === 'pine-editor'
+      ? '.monaco-editor.pine-editor-monaco'
+      : '[data-name="backtesting"]';
     const result = await evaluate(`
       (function() {
         var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
         if (!bwb) return { error: 'bottomWidgetBar not available' };
-        var panel = ${JSON.stringify(panel)};
-        var widgetName = ${JSON.stringify(widgetName)};
         var action = ${JSON.stringify(action)};
+        var btn = document.querySelector(${JSON.stringify(btnSelector)})
+          || document.querySelector('[aria-label=' + ${JSON.stringify(JSON.stringify(ariaLabel))} + ']');
+        var mounted = !!document.querySelector(${JSON.stringify(monacoSelector)});
+        var mode = bwb._mode && bwb._mode.value && bwb._mode.value();
         var bottomArea = document.querySelector('[class*="layout__area--bottom"]');
-        var isOpen = !!(bottomArea && bottomArea.offsetHeight > 50);
-        if (panel === 'pine-editor') { var monacoEl = document.querySelector('.monaco-editor.pine-editor-monaco'); isOpen = isOpen && !!monacoEl; }
-        if (panel === 'strategy-tester') { var stratPanel = document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'); isOpen = isOpen && !!(stratPanel && stratPanel.offsetParent); }
+        var visible = !!(bottomArea && bottomArea.offsetHeight > 50);
+        var isOpen = mounted && visible && mode !== 'minimized';
+
         var performed = 'none';
         if (action === 'open' || (action === 'toggle' && !isOpen)) {
-          if (panel === 'pine-editor') { if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab(); else if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
-          else { if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
+          if (!mounted && btn) btn.click();
+          if (bwb._mode && bwb._mode.value && bwb._mode.value() === 'minimized' && bwb._mode.setValue) bwb._mode.setValue('normal');
+          if (bwb._isHidden && bwb._isHidden.setValue) bwb._isHidden.setValue(false);
           performed = 'opened';
         } else if (action === 'close' || (action === 'toggle' && isOpen)) {
-          if (typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
+          if (bwb._mode && bwb._mode.setValue) bwb._mode.setValue('minimized');
           performed = 'closed';
         }
         return { was_open: isOpen, performed: performed };

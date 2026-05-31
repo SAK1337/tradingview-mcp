@@ -107,20 +107,45 @@ export async function getOhlcv({ count, summary } = {}) {
 }
 
 export async function getIndicator({ entity_id }) {
+  // Built-in studies (Moving Average, RSI, etc.) return [] from
+  // study.getInputValues() — that API only populates for Pine scripts.
+  // The properties().inputs.state() path works for both, so we read from
+  // there and normalize to the same {id, value} array shape callers expect.
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
       var study = api.getStudyById(${safeString(entity_id)});
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
-      var result = { name: null, inputs: null, visible: null };
+      var result = { name: null, inputs: [], visible: null };
       try { result.visible = study.isVisible(); } catch(e) {}
-      try { result.inputs = study.getInputValues(); } catch(e) { result.inputs_error = e.message; }
+      try {
+        var inner = study._study;
+        var mi = inner && inner.metaInfo && inner.metaInfo();
+        result.name = (mi && (mi.description || mi.shortDescription)) || null;
+      } catch(e) {}
+      try {
+        var state = study.properties().inputs.state();
+        var arr = [];
+        for (var k in state) {
+          if (!state.hasOwnProperty(k)) continue;
+          var entry = state[k];
+          // Inputs are either Property objects ({id, value}) or raw values
+          // (TV inlines string defaults like source="close"). Normalize.
+          if (entry && typeof entry === 'object' && 'id' in entry) {
+            arr.push({ id: entry.id, value: entry.value });
+          } else {
+            arr.push({ id: k, value: entry });
+          }
+        }
+        result.inputs = arr;
+      } catch(e) { result.inputs_error = e.message; }
       return result;
     })()
   `);
 
   if (data?.error) throw new Error(data.error);
 
+  // Trim payloads that include large encoded blobs (encrypted Pine inputs).
   let inputs = data?.inputs;
   if (Array.isArray(inputs)) {
     inputs = inputs.filter(inp => {
@@ -129,7 +154,7 @@ export async function getIndicator({ entity_id }) {
       return true;
     });
   }
-  return { success: true, entity_id, visible: data?.visible, inputs };
+  return { success: true, entity_id, name: data?.name, visible: data?.visible, inputs };
 }
 
 export async function getStrategyResults() {
@@ -322,33 +347,59 @@ export async function getDepth() {
 }
 
 export async function getStudyValues() {
+  // Reads the LAST BAR value of every plot in every study, directly from
+  // each study's computed series. We deliberately don't use dataWindowView()
+  // here — that path mirrors the on-screen "Data Window" sidebar, which only
+  // populates when the user's crosshair is over a bar, so values were
+  // empty (or stale at whatever bar the cursor last hovered) for headless
+  // callers. Reading from `_study.data()._items` gives a deterministic
+  // current value; `entity_id` is included so callers can disambiguate
+  // studies that share a name (e.g. two "Moving Average" with different
+  // lengths — same display name, different series).
   const data = await evaluate(`
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-      var model = chart.model();
-      var sources = model.model().dataSources();
+      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      var studies = chart.getAllStudies();
       var results = [];
-      for (var si = 0; si < sources.length; si++) {
-        var s = sources[si];
-        if (!s.metaInfo) continue;
+      for (var i = 0; i < studies.length; i++) {
+        var meta = studies[i];
         try {
-          var meta = s.metaInfo();
-          var name = meta.description || meta.shortDescription || '';
-          if (!name) continue;
+          var s = chart.getStudyById(meta.id);
+          if (!s || !s._study) continue;
+          var inner = s._study;
+          var seriesData = inner.data && inner.data();
+          var items = seriesData && seriesData._items;
+          if (!items || items.length === 0) continue;
+          var last = items[items.length - 1];
+          var vals = last && last.value;
+          if (!vals || vals.length < 2) continue;
+          var mi = inner.metaInfo && inner.metaInfo();
+          var plots = (mi && mi.plots) || [];
+          var styles = (mi && mi.styles) || {};
           var values = {};
-          try {
-            var dwv = s.dataWindowView();
-            if (dwv) {
-              var items = dwv.items();
-              if (items) {
-                for (var i = 0; i < items.length; i++) {
-                  var item = items[i];
-                  if (item._value && item._value !== '∅' && item._title) values[item._title] = item._value;
-                }
-              }
+          // vals[0] is the bar time; vals[1..] are per-plot values in
+          // metaInfo.plots declaration order. Skip plot types that carry
+          // styling instead of data — colorer/bg_colorer plots produce ARGB
+          // integers (e.g. 4285982208), shape/char/arrow plots produce
+          // marker codes — neither is useful as a "current value" reading.
+          var DATA_PLOT_TYPES = { line:1, line_break:1, area:1, histogram:1, stepline:1, cross:1, circles:1, columns:1, polyline:1 };
+          for (var j = 0; j < plots.length; j++) {
+            var v = vals[j + 1];
+            if (v == null || v === '∅') continue;
+            var plot = plots[j];
+            if (plot.type && !DATA_PLOT_TYPES[plot.type]) continue;
+            var style = styles[plot.id];
+            if (style && style.isHidden) continue;
+            var title = (style && style.title) || plot.id;
+            if (typeof v === 'number') {
+              if (!isFinite(v)) continue;
+              v = (Math.round(v * 100) / 100).toFixed(2);
             }
-          } catch(e) {}
-          if (Object.keys(values).length > 0) results.push({ name: name, values: values });
+            values[title] = v;
+          }
+          if (Object.keys(values).length > 0) {
+            results.push({ entity_id: meta.id, name: meta.name, values: values });
+          }
         } catch(e) {}
       }
       return results;

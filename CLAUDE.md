@@ -1,3 +1,22 @@
+<!-- OPENSPEC:START -->
+# OpenSpec Instructions
+
+These instructions are for AI assistants working in this project.
+
+Always open `@/openspec/AGENTS.md` when the request:
+- Mentions planning or proposals (words like proposal, spec, change, plan)
+- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
+- Sounds ambiguous and you need the authoritative spec before coding
+
+Use `@/openspec/AGENTS.md` to learn:
+- How to create and apply change proposals
+- Spec format and conventions
+- Project structure and guidelines
+
+Keep this managed block so 'openspec update' can refresh the instructions.
+
+<!-- OPENSPEC:END -->
+
 # TradingView MCP — Claude Instructions
 
 68 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
@@ -127,3 +146,83 @@ Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9222) ←→ Trading
 ```
 
 Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`
+
+## Running Reports
+
+This repo has a prompt-driven report pipeline. Each symbol has its own prompt file with the exact workflow for generating a styled HTML + PDF technical analysis report from the live chart state.
+
+### Available report prompts
+
+Located in `Prompts/`:
+
+| Prompt | Symbol | Timeframe | Indicator suite |
+|---|---|---|---|
+| `Prompts/SOLUSDT.txt` | BINANCE:SOLUSDT | 1W | 30W SMA + MarketCipher_A/B + Prophesier v5.20 + v6.10 + Prophet (HA) |
+| `Prompts/ETHUSDT.txt` | BINANCE:ETHUSDT | 1D | 4 MAs (20 EMA + 30 + 50 + 200 SMA) + same proprietary stack as SOL (HA) |
+| `Prompts/HYPEUSDC.txt` | COINBASE:HYPEUSDC.P | 1D | 3 MAs (10 EMA + 30 + 40 SMA) + MarketCipher_A/B + Prophet + Prophesier v6.10 only (HA) |
+| `Prompts/BTCUSDT.txt` | BINANCE:BTCUSDT | 1D | 3 custom SMAs (50/100/200) + Sibyl + MarketCipher_B + Prophesier v6.00 (regular candles, **not** HA) |
+
+Each prompt is self-contained and reflects that chart's specific indicator layout. The differences matter — Prophesier v6.00 (on BTC) lacks the multi-timeframe RSI table that v6.10 (on SOL/ETH/HYPE) emits, so the BTC report omits that section.
+
+### How to run a report
+
+1. **Tell Claude** to "run the SOL report" / "generate today's HYPE report" / "update the BTC report" etc. Claude reads the matching prompt from `Prompts/<SYMBOL>.txt` and follows it.
+2. The prompt's Section 2 is idempotent — if the chart layout already matches what the prompt expects, setup is skipped and only data gathering runs.
+3. **Today's date** comes from the session date context (don't pass it explicitly — Claude uses the system date).
+
+### Report pipeline overview
+
+Every prompt follows the same 8-step pipeline:
+
+1. **Verify CDP connection** (`node src/cli/index.js status`). If broken, use the `launch-tradingview` skill.
+2. **Inspect chart state** — if it matches the prompt's expected indicator/timeframe/chart-type set, skip step 3.
+3. **Set up the chart** (only if needed) — add missing built-in MAs. **Do not programmatically re-add commercial studies** (MarketCipher, Prophesier, Prophet, Sibyl) — they hold the user's hand-tuned settings.
+4. **Gather data** — quote, OHLCV summary, indicator values, Prophesier v6.10 MTF RSI table (if present), pine labels/lines/boxes, user drawings. Send `node src/cli/index.js ui keyboard --key Escape` first to dismiss any MarketCipher alert dialogs that may have popped open.
+5. **Zoom + screenshot** — each prompt specifies a different zoom range (30 days for SOL daily, 30 weeks for SOL weekly, 60 days for HYPE, 120 days for BTC, 120 days for ETH).
+6. **Build the HTML report** — uses a placeholder `__CHART_B64__` for the embedded screenshot to keep the 300+ KB base64 out of LLM context. Inject via PowerShell:
+   ```powershell
+   $tpl = [IO.File]::ReadAllText('.report_template.html')
+   $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('<screenshot.png>'))
+   [IO.File]::WriteAllText('Reports\<SYMBOL>1D-<date>.html', $tpl.Replace('__CHART_B64__',$b64), [Text.UTF8Encoding]::new($false))
+   ```
+   Then delete the template.
+7. **Generate the PDF** via `python scripts/html_to_pdf.py Reports/<SYMBOL>1D-<date>.html` (or invoke the `html-to-pdf` skill).
+8. **Report results** with the file paths and sizes. By convention, also open the PDF: `Invoke-Item 'Reports\<file>.pdf'`.
+
+### Report filename convention
+
+`Reports/<SYMBOL><TIMEFRAME>-<YYYY-MM-DD>.html` (and `.pdf` next to it). Examples:
+- `Reports/SOLUSDT1W-2026-05-20.html` (weekly SOL)
+- `Reports/BTCUSDT1D-2026-05-20.html` (daily BTC)
+- `Reports/ETHUSDT1D-2026-05-21.html` (daily ETH)
+
+A daily run overwrites the same-date file. A new day creates a new file; old reports stay as historical record.
+
+### Snapshot-only refresh (no narrative changes)
+
+When the user says "redo the chart snapshot" or "refresh the picture" and the numbers haven't changed meaningfully, use a targeted base64 swap instead of rebuilding the whole template:
+
+```powershell
+$html = [IO.File]::ReadAllText('Reports\<SYMBOL>1D-<date>.html')
+$b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('<new>.png'))
+$new = [regex]::Replace($html, '(data:image/png;base64,)[A-Za-z0-9+/=]+', "`$1$b64")
+[IO.File]::WriteAllText('Reports\<SYMBOL>1D-<date>.html', $new, [Text.UTF8Encoding]::new($false))
+```
+
+Then re-run `html_to_pdf.py` to regenerate the PDF.
+
+### Adding a new report symbol
+
+To add a new symbol (e.g., `LINKUSDT.txt`):
+1. Switch the chart to the symbol (`node src/cli/index.js symbol "BINANCE:LINKUSDT"`) and let the user verify their preferred indicator/MA setup.
+2. Run `state`, `draw list`, `values`, and `data tables` to capture the actual indicator suite.
+3. Copy the closest existing prompt (HYPE for daily-HA, BTC for daily-regular-candles, SOL for weekly) and adapt:
+   - Update symbol, timeframe, chart type expectations
+   - Update the studies list in Section 2 with the actual entity names
+   - Note any unique/missing indicators in a "differences from SOL/HYPE" callout
+   - Update Section 5's zoom window if the symbol's bar density warrants it
+4. Add the new prompt to the table at the top of this section.
+
+### Cross-chart indicator persistence
+
+TradingView keeps indicator state per chart tab, not per symbol. The SOL and ETH charts in this repo share a tab — adding MAs on one is visible on the other. The BTC and HYPE charts each have their own tab. When in doubt, run `state` after switching symbols and check whether the indicator list matches the prompt's expectations; if not, the user may need to use a separate chart tab for that symbol.
