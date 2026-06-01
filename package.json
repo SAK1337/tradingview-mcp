@@ -1,14 +1,42 @@
 {
-  "name": "tradingview-mcp",
+  "name": "@specialagentk/tradingview-mcp",
   "version": "1.0.0",
   "description": "MCP bridge for TradingView Desktop via Chrome DevTools Protocol",
   "type": "module",
+  "license": "MIT",
+  "author": "Special Agent K",
+  "homepage": "https://github.com/tradesdontlie/tradingview-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tradesdontlie/tradingview-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tradesdontlie/tradingview-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tradingview",
+    "cdp",
+    "chrome-devtools-protocol",
+    "trading",
+    "pine-script"
+  ],
   "main": "src/server.js",
   "engines": {
     "node": ">=18.0.0"
   },
   "bin": {
-    "tv": "src/cli/index.js"
+    "tradingview-mcp": "src/server.js",
+    "tradingview-mcp-cli": "src/cli/index.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "exports": {
     ".": "./src/server.js",
@@ -17,6 +45,7 @@
   "scripts": {
     "start": "node src/server.js",
     "tv": "node src/cli/index.js",
+    "prepublishOnly": "npm run test:unit",
     "test": "node --test tests/e2e.test.js tests/pine_analyze.test.js tests/sanitization.test.js tests/replay.test.js",
     "test:e2e": "node --test tests/e2e.test.js",
     "test:unit": "node --test tests/sanitization.test.js tests/replay.test.js tests/tab.test.js tests/connection.test.js tests/wait.test.js tests/chart_readiness.test.js tests/router.test.js tests/input_validation.test.js tests/data_perf.test.js tests/screenshot_retention.test.js tests/launch_safety.test.js tests/data.test.js tests/alerts.test.js tests/ui.test.js",
