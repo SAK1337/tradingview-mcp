@@ -97,9 +97,25 @@ claude mcp add tradingview -- npx -y @specialagentk/tradingview-mcp
 That's it — restart Claude and ask *"Use tv_health_check to verify TradingView is connected."*
 
 You still need TradingView Desktop running with the debug port (see [Launch TradingView with
-CDP](#2-launch-tradingview-with-cdp) below, or use the `tv_launch` tool). The CLI ships in the
-same package — `npx -y @specialagentk/tradingview-mcp` runs the MCP server, and the
-`tradingview-mcp-cli` bin exposes every tool as a pipe-friendly command.
+CDP](#2-launch-tradingview-with-cdp) below, or use the `tv_launch` tool). The package has a single
+entrypoint — `npx -y @specialagentk/tradingview-mcp` runs the MCP server, and
+`npx -y @specialagentk/tradingview-mcp cli <command>` exposes every tool as a pipe-friendly command.
+
+**If `npx` can't launch it** — some Node runners (e.g. Volta on Windows) don't resolve package bins
+on the fly, and offline/proxied setups can't fetch on demand — install it once and point Claude at
+the installed command:
+
+```bash
+npm i -g @specialagentk/tradingview-mcp
+```
+
+```bash
+# macOS / Linux
+claude mcp add tradingview -- tradingview-mcp
+
+# Windows (run from PowerShell, not git-bash, so the /c isn't path-mangled)
+claude mcp add tradingview -- cmd /c tradingview-mcp
+```
 
 ## Quick Start (from source)
 
@@ -163,15 +179,22 @@ Ask Claude: *"Use tv_health_check to verify TradingView is connected"*
 
 ## CLI
 
-Every MCP tool is also accessible as a `tv` CLI command. All output is JSON for piping with `jq`.
+Every MCP tool is also reachable through the package's CLI. All output is JSON for piping with `jq`.
 
 ```bash
-# Install globally (optional)
-npm link
+# Installed from npm
+tradingview-mcp cli <command>
 
-# Or run directly
-node src/cli/index.js <command>
+# From a source clone
+node src/bin.js cli <command>      # or: npm run tv -- <command>
 ```
+
+> **Migration (2.x):** the CLI is now a subcommand of the single `tradingview-mcp` entrypoint. The
+> separate `tradingview-mcp-cli` bin was removed — replace `tradingview-mcp-cli <command>` with
+> `tradingview-mcp cli <command>`.
+
+In the examples below, **`tv`** is shorthand for whichever entrypoint you use — `tradingview-mcp cli`
+(installed) or `node src/bin.js cli` (from source).
 
 ### Quick Examples
 
