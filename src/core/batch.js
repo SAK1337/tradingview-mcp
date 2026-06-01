@@ -1,8 +1,8 @@
 /**
  * Core batch execution logic.
  */
-import { evaluate, evaluateAsync, getClient, getChartApi, getChartCollection, safeString } from '../connection.js';
-import { waitForChartReady } from '../wait.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, getChartApi as _getChartApi, getChartCollection as _getChartCollection, safeString } from '../connection.js';
+import { waitForChartReady as _waitForChartReady } from '../wait.js';
 import { SCREENSHOT_DIR, safeScreenshotName, pruneScreenshots } from './capture.js';
 import { writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
@@ -36,7 +36,19 @@ export function assertBatchSize(symbols, timeframes) {
   return total;
 }
 
-export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count }) {
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getClient: deps?.getClient || _getClient,
+    getChartApi: deps?.getChartApi || _getChartApi,
+    getChartCollection: deps?.getChartCollection || _getChartCollection,
+    waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+  };
+}
+
+export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, _deps }) {
+  const { evaluate, evaluateAsync, getClient, getChartApi, getChartCollection, waitForChartReady } = _resolve(_deps);
   assertBatchSize(symbols, timeframes);
   const tfs = timeframes && timeframes.length > 0 ? timeframes : [null];
   const delay = delay_ms || DEFAULT_BATCH_DELAY_MS;

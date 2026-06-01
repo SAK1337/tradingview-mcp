@@ -3,19 +3,28 @@
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
 import {
-  getClient,
-  evaluate,
+  getClient as _getClient,
   CDP_HOST,
   CDP_PORT,
-  fetchWithTimeout,
-  disconnect,
-  reconnect,
+  fetchWithTimeout as _fetchWithTimeout,
+  disconnect as _disconnect,
+  reconnect as _reconnect,
 } from '../connection.js';
+
+function _resolve(deps) {
+  return {
+    getClient: deps?.getClient || _getClient,
+    fetchWithTimeout: deps?.fetchWithTimeout || _fetchWithTimeout,
+    disconnect: deps?.disconnect || _disconnect,
+    reconnect: deps?.reconnect || _reconnect,
+  };
+}
 
 /**
  * List all open chart tabs (CDP page targets).
  */
-export async function list() {
+export async function list({ _deps } = {}) {
+  const { fetchWithTimeout } = _resolve(_deps);
   const resp = await fetchWithTimeout(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
 
@@ -35,8 +44,9 @@ export async function list() {
 /**
  * Open a new chart tab via keyboard shortcut (Ctrl+T / Cmd+T).
  */
-export async function newTab() {
-  const before = await list();
+export async function newTab({ _deps } = {}) {
+  const { getClient } = _resolve(_deps);
+  const before = await list({ _deps });
 
   const c = await getClient();
 
@@ -55,7 +65,7 @@ export async function newTab() {
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 't', code: 'KeyT' });
 
   // Poll the tab list until the count increases (bounded), instead of a fixed sleep.
-  const state = await waitForTabCount(c => c > before.tab_count);
+  const state = await waitForTabCount(c => c > before.tab_count, { _deps });
   if (!state) {
     throw new Error('New tab did not appear within the expected time');
   }
@@ -66,9 +76,9 @@ export async function newTab() {
  * Poll list() until predicate(tab_count) is true or attempts are exhausted.
  * Returns the latest list() state when the predicate matches, otherwise null.
  */
-async function waitForTabCount(predicate, { attempts = 20, intervalMs = 200 } = {}) {
+async function waitForTabCount(predicate, { attempts = 20, intervalMs = 200, _deps } = {}) {
   for (let i = 0; i < attempts; i++) {
-    const state = await list();
+    const state = await list({ _deps });
     if (predicate(state.tab_count)) return state;
     await new Promise(r => setTimeout(r, intervalMs));
   }
@@ -78,8 +88,9 @@ async function waitForTabCount(predicate, { attempts = 20, intervalMs = 200 } = 
 /**
  * Close the current tab via keyboard shortcut (Ctrl+W / Cmd+W).
  */
-export async function closeTab() {
-  const before = await list();
+export async function closeTab({ _deps } = {}) {
+  const { getClient } = _resolve(_deps);
+  const before = await list({ _deps });
   if (before.tab_count <= 1) {
     throw new Error('Cannot close the last tab. Use tv_launch to restart TradingView instead.');
   }
@@ -100,15 +111,16 @@ export async function closeTab() {
   // Poll the tab list until the count decreases (bounded). If it never changes
   // within the bound, fall back to the latest observed state (conservative —
   // a stuck close-confirmation dialog should not throw).
-  const after = (await waitForTabCount(c => c < before.tab_count)) || (await list());
+  const after = (await waitForTabCount(c => c < before.tab_count, { _deps })) || (await list({ _deps }));
   return { success: true, action: 'tab_closed', tabs_before: before.tab_count, tabs_after: after.tab_count };
 }
 
 /**
  * Switch to a tab by index. Reconnects CDP to the new target.
  */
-export async function switchTab({ index }) {
-  const tabs = await list();
+export async function switchTab({ index, _deps }) {
+  const { fetchWithTimeout, disconnect, reconnect } = _resolve(_deps);
+  const tabs = await list({ _deps });
   const idx = Number(index);
 
   if (idx >= tabs.tab_count) {

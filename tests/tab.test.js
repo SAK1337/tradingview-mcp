@@ -94,3 +94,69 @@ describe('switchTab — index validation', () => {
     );
   });
 });
+
+// ── switchTab reconnect (DEFERRED from #1, now unblocked by tab.js _deps) ──
+//
+// tab.js gained a `_resolve(_deps)` seam in the
+// complete-dependency-injection-and-tests change, so we can inject fakes for
+// fetchWithTimeout/disconnect/reconnect and assert the CDP session is rebuilt
+// against the NEW target id on a valid index — no live chrome-remote-interface
+// attach required.
+describe('switchTab — reconnects CDP to the new target (DI)', () => {
+  function makeDeps(n) {
+    const targets = Array.from({ length: n }, (_, i) => ({
+      type: 'page',
+      id: `TARGET-${i}`,
+      title: `Live stock charts on chart ${i}`,
+      url: `https://www.tradingview.com/chart/abc${i}/`,
+    }));
+    const calls = { activate: [], disconnect: 0, reconnect: [] };
+    const _deps = {
+      fetchWithTimeout: async (url) => {
+        if (String(url).includes('/json/list')) {
+          return { async json() { return targets; }, async text() { return ''; } };
+        }
+        if (String(url).includes('/json/activate/')) {
+          calls.activate.push(String(url));
+          return { async text() { return 'Target activated'; } };
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      },
+      disconnect: async () => { calls.disconnect++; },
+      reconnect: async (id) => { calls.reconnect.push(id); },
+    };
+    return { _deps, calls };
+  }
+
+  it('activates, disconnects, and reconnects to the selected tab id', async () => {
+    const { _deps, calls } = makeDeps(3);
+    const r = await switchTab({ index: 2, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.index, 2);
+    assert.equal(r.tab_id, 'TARGET-2');
+    assert.equal(r.chart_id, 'abc2');
+    // Activated the correct target via the HTTP endpoint.
+    assert.equal(calls.activate.length, 1);
+    assert.match(calls.activate[0], /\/json\/activate\/TARGET-2$/);
+    // Rebuilt the CDP session against the NEW target id.
+    assert.equal(calls.disconnect, 1, 'disconnect called once');
+    assert.deepEqual(calls.reconnect, ['TARGET-2'], 'reconnect bound to new target');
+  });
+
+  it('does not reconnect when activate throws', async () => {
+    const { _deps, calls } = makeDeps(2);
+    _deps.fetchWithTimeout = async (url) => {
+      if (String(url).includes('/json/list')) {
+        return { async json() {
+          return [
+            { type: 'page', id: 'T0', title: 'Live stock charts on chart', url: 'https://www.tradingview.com/chart/a/' },
+            { type: 'page', id: 'T1', title: 'Live stock charts on chart', url: 'https://www.tradingview.com/chart/b/' },
+          ];
+        } };
+      }
+      throw new Error('activate network failure');
+    };
+    await assert.rejects(() => switchTab({ index: 1, _deps }), /Failed to activate tab/);
+    assert.equal(calls.disconnect, 0, 'no reconnect attempted after activate failure');
+  });
+});

@@ -1,7 +1,15 @@
 /**
  * Core UI automation logic.
  */
-import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, safeString } from '../connection.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getClient: deps?.getClient || _getClient,
+  };
+}
 
 /**
  * Page-side helper source: given a CSS attribute value, return it escaped for safe
@@ -53,7 +61,8 @@ const LAYOUT_LOAD_SETTLE_MS = 1000;
 // Gap between the two clicks of a synthesized double-click.
 const DOUBLE_CLICK_GAP_MS = 50;
 
-export async function click({ by, value }) {
+export async function click({ by, value, _deps }) {
+  const { evaluate } = _resolve(_deps);
   // The value reaches the page only via safeString() (a JS string literal) — it
   // can never terminate the evaluate payload. __escAttr() then escapes it for the
   // CSS attribute selector so it can't break out of the selector either.
@@ -81,7 +90,8 @@ export async function click({ by, value }) {
   return { success: true, clicked: result };
 }
 
-export async function openPanel({ panel, action }) {
+export async function openPanel({ panel, action, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const isBottomPanel = panel === 'pine-editor' || panel === 'strategy-tester';
   if (isBottomPanel) {
     // Bottom panels (Pine Editor, Strategy Tester) live in bottomWidgetBar.
@@ -158,7 +168,8 @@ export async function openPanel({ panel, action }) {
   }
 }
 
-export async function fullscreen() {
+export async function fullscreen({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var btn = document.querySelector('[data-name="header-toolbar-fullscreen"]');
@@ -171,7 +182,8 @@ export async function fullscreen() {
   return { success: true, action: 'fullscreen_toggled' };
 }
 
-export async function layoutList() {
+export async function layoutList({ _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
   const layouts = await evaluateAsync(`
     new Promise(function(resolve) {
       try {
@@ -188,7 +200,8 @@ export async function layoutList() {
   return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [] };
 }
 
-export async function layoutSwitch({ name }) {
+export async function layoutSwitch({ name, _deps }) {
+  const { evaluate, evaluateAsync } = _resolve(_deps);
   const escaped = JSON.stringify(name);
   const result = await evaluateAsync(`
     new Promise(function(resolve) {
@@ -231,7 +244,8 @@ export async function layoutSwitch({ name }) {
   return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dismissed };
 }
 
-export async function keyboard({ key, modifiers }) {
+export async function keyboard({ key, modifiers, _deps }) {
+  const { getClient } = _resolve(_deps);
   const c = await getClient();
   let mod = 0;
   if (modifiers) {
@@ -252,13 +266,15 @@ export async function keyboard({ key, modifiers }) {
   return { success: true, key, modifiers: modifiers || [] };
 }
 
-export async function typeText({ text }) {
+export async function typeText({ text, _deps }) {
+  const { getClient } = _resolve(_deps);
   const c = await getClient();
   await c.Input.insertText({ text });
   return { success: true, typed: text.substring(0, 100), length: text.length };
 }
 
-export async function hover({ by, value }) {
+export async function hover({ by, value, _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
   const coords = await evaluate(`
     (function() {
       ${ATTR_ESCAPE_FN}
@@ -285,7 +301,8 @@ export async function hover({ by, value }) {
   return { success: true, hovered: { by, value, tag: coords.tag, x: coords.x, y: coords.y } };
 }
 
-export async function scroll({ direction, amount }) {
+export async function scroll({ direction, amount, _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
   const c = await getClient();
   const px = amount || 300;
   const center = await evaluate(`
@@ -303,7 +320,8 @@ export async function scroll({ direction, amount }) {
   return { success: true, direction, amount: px };
 }
 
-export async function mouseClick({ x, y, button, double_click }) {
+export async function mouseClick({ x, y, button, double_click, _deps }) {
+  const { getClient } = _resolve(_deps);
   const c = await getClient();
   const btn = button === 'right' ? 'right' : button === 'middle' ? 'middle' : 'left';
   const btnNum = btn === 'right' ? 2 : btn === 'middle' ? 1 : 0;
@@ -318,7 +336,8 @@ export async function mouseClick({ x, y, button, double_click }) {
   return { success: true, x, y, button: btn, double_click: !!double_click };
 }
 
-export async function findElement({ query, strategy }) {
+export async function findElement({ query, strategy, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const strat = strategy || 'text';
   const results = await evaluate(`
     (function() {
@@ -360,7 +379,8 @@ export async function findElement({ query, strategy }) {
   return { success: true, query, strategy: strat, count: results?.length || 0, elements: results || [] };
 }
 
-export async function uiEvaluate({ expression }) {
+export async function uiEvaluate({ expression, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(expression);
   return { success: true, result };
 }

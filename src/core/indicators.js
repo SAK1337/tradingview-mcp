@@ -1,11 +1,16 @@
 /**
  * Core indicator settings logic.
  */
-import { evaluate, safeString, parseJsonArg, KNOWN_PATHS } from '../connection.js';
+import { evaluate as _evaluate, safeString, parseJsonArg, KNOWN_PATHS } from '../connection.js';
 
 const CHART_API = KNOWN_PATHS.chartApi;
 
-export async function setInputs({ entity_id, inputs: inputsRaw }) {
+function _resolve(deps) {
+  return { evaluate: deps?.evaluate || _evaluate };
+}
+
+export async function setInputs({ entity_id, inputs: inputsRaw, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const inputs = parseJsonArg(inputsRaw, 'inputs');
   if (!entity_id) throw new Error('entity_id is required. Use chart_get_state to find study IDs.');
   if (!inputs || typeof inputs !== 'object' || Object.keys(inputs).length === 0) {
@@ -109,7 +114,8 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
   };
 }
 
-export async function toggleVisibility({ entity_id, visible }) {
+export async function toggleVisibility({ entity_id, visible, _deps }) {
+  const { evaluate } = _resolve(_deps);
   if (!entity_id) throw new Error('entity_id is required. Use chart_get_state to find study IDs.');
   if (typeof visible !== 'boolean') throw new Error('visible must be a boolean (true or false)');
 

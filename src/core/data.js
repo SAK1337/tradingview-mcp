@@ -1,7 +1,14 @@
 /**
  * Core data access logic.
  */
-import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+  };
+}
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -157,7 +164,8 @@ function buildAllGraphicsJS(filter) {
  * backward compatibility, but can be re-pointed at this when only one
  * round-trip is desired.
  */
-export async function getAllGraphics({ study_filter } = {}) {
+export async function getAllGraphics({ study_filter, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const payload = await evaluate(buildAllGraphicsJS(study_filter || ''));
   return {
     lines: payload?.lines || [],
@@ -173,8 +181,8 @@ export async function getAllGraphics({ study_filter } = {}) {
  * the four readers return, in one round-trip. Warnings are attached to each
  * slice so `_warnings` behavior is preserved per type.
  */
-export async function getAllGraphicsShaped({ study_filter, max_labels, verbose } = {}) {
-  const all = await getAllGraphics({ study_filter });
+export async function getAllGraphicsShaped({ study_filter, max_labels, verbose, _deps } = {}) {
+  const all = await getAllGraphics({ study_filter, _deps });
   return {
     lines: shapeLines(all.lines, all.warnings, { verbose }),
     labels: shapeLabels(all.labels, all.warnings, { max_labels, verbose }),
@@ -183,7 +191,8 @@ export async function getAllGraphicsShaped({ study_filter, max_labels, verbose }
   };
 }
 
-export async function getOhlcv({ count, summary } = {}) {
+export async function getOhlcv({ count, summary, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const limit = Math.min(count || 100, MAX_OHLCV_BARS);
   // Let evaluate() errors (CDP drop, moved API path, page error) propagate so
   // the real cause reaches the caller. The "chart may still be loading" hint is
@@ -230,7 +239,8 @@ export async function getOhlcv({ count, summary } = {}) {
   return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
 }
 
-export async function getIndicator({ entity_id }) {
+export async function getIndicator({ entity_id, _deps }) {
+  const { evaluate } = _resolve(_deps);
   // Built-in studies (Moving Average, RSI, etc.) return [] from
   // study.getInputValues() — that API only populates for Pine scripts.
   // The properties().inputs.state() path works for both, so we read from
@@ -299,7 +309,8 @@ export function findStrategy(predicate) {
         }`;
 }
 
-export async function getStrategyResults() {
+export async function getStrategyResults({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const results = await evaluate(`
     (function() {
       try {
@@ -326,7 +337,8 @@ export async function getStrategyResults() {
   return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {} };
 }
 
-export async function getTrades({ max_trades } = {}) {
+export async function getTrades({ max_trades, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const limit = Math.min(max_trades || 20, MAX_TRADES);
   const trades = await evaluate(`
     (function() {
@@ -358,7 +370,8 @@ export async function getTrades({ max_trades } = {}) {
   return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [] };
 }
 
-export async function getEquity() {
+export async function getEquity({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const equity = await evaluate(`
     (function() {
       try {
@@ -394,7 +407,8 @@ export async function getEquity() {
   return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note };
 }
 
-export async function getQuote({ symbol } = {}) {
+export async function getQuote({ symbol, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
@@ -429,7 +443,8 @@ export async function getQuote({ symbol } = {}) {
   return { success: true, ...data };
 }
 
-export async function getDepth() {
+export async function getDepth({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var domPanel = document.querySelector('[class*="depth"]')
@@ -473,7 +488,8 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues({ study_filter } = {}) {
+export async function getStudyValues({ study_filter, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   // Reads the LAST BAR value of every plot in every study, directly from
   // each study's computed series. We deliberately don't use dataWindowView()
   // here — that path mirrors the on-screen "Data Window" sidebar, which only
@@ -566,7 +582,8 @@ export function shapeLines(raw, warnings = [], { verbose } = {}) {
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineLines({ study_filter, verbose } = {}) {
+export async function getPineLines({ study_filter, verbose, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const payload = await evaluate(buildGraphicsJS('dwglines', 'lines', study_filter || ''));
   return shapeLines(payload?.results || [], payload?.warnings || [], { verbose });
 }
@@ -588,7 +605,8 @@ export function shapeLabels(raw, warnings = [], { max_labels, verbose } = {}) {
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
+export async function getPineLabels({ study_filter, max_labels, verbose, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const payload = await evaluate(buildGraphicsJS('dwglabels', 'labels', study_filter || ''));
   return shapeLabels(payload?.results || [], payload?.warnings || [], { max_labels, verbose });
 }
@@ -618,7 +636,8 @@ export function shapeTables(raw, warnings = []) {
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineTables({ study_filter } = {}) {
+export async function getPineTables({ study_filter, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const payload = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', study_filter || ''));
   return shapeTables(payload?.results || [], payload?.warnings || []);
 }
@@ -644,7 +663,8 @@ export function shapeBoxes(raw, warnings = [], { verbose } = {}) {
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineBoxes({ study_filter, verbose } = {}) {
+export async function getPineBoxes({ study_filter, verbose, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const payload = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', study_filter || ''));
   return shapeBoxes(payload?.results || [], payload?.warnings || [], { verbose });
 }

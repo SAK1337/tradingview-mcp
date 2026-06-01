@@ -1,7 +1,7 @@
 /**
  * Core screenshot/capture logic.
  */
-import { getClient, evaluate, getChartCollection } from '../connection.js';
+import { getClient as _getClient, evaluate as _evaluate, getChartCollection as _getChartCollection } from '../connection.js';
 import { writeFile, mkdir, readdir, stat, unlink } from 'fs/promises';
 import { mkdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
@@ -19,6 +19,14 @@ const DEFAULT_MAX_AGE_DAYS = 7;
 mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
 export { SCREENSHOT_DIR };
+
+function _resolve(deps) {
+  return {
+    getClient: deps?.getClient || _getClient,
+    evaluate: deps?.evaluate || _evaluate,
+    getChartCollection: deps?.getChartCollection || _getChartCollection,
+  };
+}
 
 /**
  * Reduce a caller-supplied filename to a traversal-safe basename.
@@ -122,7 +130,9 @@ export async function captureScreenshot({
   max_files,
   max_age_days,
   max_bytes,
+  _deps,
 } = {}) {
+  const { getClient, evaluate, getChartCollection } = _resolve(_deps);
   await mkdir(SCREENSHOT_DIR, { recursive: true });
 
   // Build the default timestamp name first, then sanitize the final filename.

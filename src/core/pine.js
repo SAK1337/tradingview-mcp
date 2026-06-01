@@ -3,8 +3,17 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
-import { pollUntil } from '../wait.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
+import { pollUntil as _pollUntil } from '../wait.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getClient: deps?.getClient || _getClient,
+    pollUntil: deps?.pollUntil || _pollUntil,
+  };
+}
 
 // Base URL for the Pine REST facade (compile/translate/list/get/save). Overridable
 // via PINE_FACADE_URL so air-gapped / proxied setups can point at a mirror; defaults
@@ -59,7 +68,8 @@ const FIND_MONACO = `
  * Opens the Pine Editor panel and waits for Monaco to become available.
  * Returns true if editor is accessible, false on timeout.
  */
-export async function ensurePineEditorOpen() {
+export async function ensurePineEditorOpen({ _deps } = {}) {
+  const { evaluate, pollUntil } = _resolve(_deps);
   // Short-circuit: editor already rendered AND bottom panel visible.
   // Monaco can be present in the DOM while the bottom panel is minimized
   // (height 0), in which case clicks on the editor's toolbar buttons no-op,
@@ -290,8 +300,9 @@ export async function check({ source }) {
 
 // ── Functions requiring TradingView connection ──
 
-export async function getSource() {
-  const editorReady = await ensurePineEditorOpen();
+export async function getSource({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor or Monaco not found in React fiber tree.');
 
   const source = await evaluate(`
@@ -309,8 +320,9 @@ export async function getSource() {
   return { success: true, source, line_count: source.split('\n').length, char_count: source.length };
 }
 
-export async function setSource({ source }) {
-  const editorReady = await ensurePineEditorOpen();
+export async function setSource({ source, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const escaped = JSON.stringify(source);
@@ -327,8 +339,9 @@ export async function setSource({ source }) {
   return { success: true, lines_set: source.split('\n').length };
 }
 
-export async function compile() {
-  const editorReady = await ensurePineEditorOpen();
+export async function compile({ _deps } = {}) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const clicked = await evaluate(`
@@ -365,8 +378,9 @@ export async function compile() {
   return { success: true, button_clicked: clicked || 'keyboard_shortcut', source: 'dom_fallback' };
 }
 
-export async function getErrors() {
-  const editorReady = await ensurePineEditorOpen();
+export async function getErrors({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const errors = await evaluate(`
@@ -390,8 +404,9 @@ export async function getErrors() {
   };
 }
 
-export async function save() {
-  const editorReady = await ensurePineEditorOpen();
+export async function save({ _deps } = {}) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const c = await getClient();
@@ -422,8 +437,9 @@ export async function save() {
   return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
 }
 
-export async function getConsole() {
-  const editorReady = await ensurePineEditorOpen();
+export async function getConsole({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const entries = await evaluate(`
@@ -472,8 +488,9 @@ export async function getConsole() {
   return { success: true, entries: entries || [], entry_count: entries?.length || 0 };
 }
 
-export async function smartCompile() {
-  const editorReady = await ensurePineEditorOpen();
+export async function smartCompile({ _deps } = {}) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const studiesBefore = await evaluate(`
@@ -551,8 +568,9 @@ export async function smartCompile() {
   };
 }
 
-export async function newScript({ type }) {
-  const editorReady = await ensurePineEditorOpen();
+export async function newScript({ type, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const typeMap = { indicator: 'indicator', strategy: 'strategy', library: 'library' };
@@ -580,8 +598,9 @@ export async function newScript({ type }) {
   return { success: true, type, action: 'new_script_created', template: typeMap[type] };
 }
 
-export async function openScript({ name }) {
-  const editorReady = await ensurePineEditorOpen();
+export async function openScript({ name, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const escapedName = JSON.stringify(name.toLowerCase());
@@ -634,7 +653,8 @@ export async function openScript({ name }) {
   return { success: true, name: result.name, script_id: result.id, lines: result.lines, source: 'internal_api', opened: true };
 }
 
-export async function listScripts() {
+export async function listScripts({ _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
   const scripts = await evaluateAsync(`
     fetch('${PINE_FACADE_BASE}/list/?filter=saved', { credentials: 'include' })
       .then(function(r) { return r.json(); })

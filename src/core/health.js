@@ -1,9 +1,17 @@
 /**
  * Core health/discovery/launch logic.
  */
-import { getClient, getTargetInfo, evaluate } from '../connection.js';
+import { getClient as _getClient, getTargetInfo as _getTargetInfo, evaluate as _evaluate } from '../connection.js';
 import { existsSync } from 'fs';
 import { execSync, execFileSync, spawn } from 'child_process';
+
+function _resolve(deps) {
+  return {
+    getClient: deps?.getClient || _getClient,
+    getTargetInfo: deps?.getTargetInfo || _getTargetInfo,
+    evaluate: deps?.evaluate || _evaluate,
+  };
+}
 
 // PID of the TradingView process this tool last spawned, persisted for the
 // lifetime of the MCP server process. We only ever force-kill THIS pid on a
@@ -81,7 +89,8 @@ async function probeCdpPort(cdpPort) {
   }
 }
 
-export async function healthCheck() {
+export async function healthCheck({ _deps } = {}) {
+  const { getClient, getTargetInfo, evaluate } = _resolve(_deps);
   await getClient();
   const target = await getTargetInfo();
 
@@ -118,7 +127,8 @@ export async function healthCheck() {
   };
 }
 
-export async function discover() {
+export async function discover({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const paths = await evaluate(`
     (function() {
       var results = {};
@@ -164,7 +174,8 @@ export async function discover() {
   return { success: true, apis_available: available, apis_total: total, apis: paths };
 }
 
-export async function uiState() {
+export async function uiState({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const state = await evaluate(`
     (function() {
       var ui = {};
