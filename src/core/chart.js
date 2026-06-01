@@ -1,16 +1,28 @@
 /**
  * Core chart control logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
-import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite, parseJsonArg, KNOWN_PATHS } from '../connection.js';
+import { waitForChartReady as _waitForChartReady, pollUntil as _pollUntil } from '../wait.js';
 
-const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+const CHART_API = KNOWN_PATHS.chartApi;
+
+// Delay after setSymbol() to let the page-side setSymbol callback fire before we
+// begin polling for chart readiness; matches TV's internal symbol-switch latency.
+const SYMBOL_SWITCH_SETTLE_MS = 500;
+// Studies are added asynchronously — bound the poll for createStudy() to register
+// the new entity before diffing the study list to report the new id. Same elapsed
+// budget as the former fixed sleep, but returns early once the study appears.
+const STUDY_ADD_SETTLE_MS = 1500;
+const STUDY_ADD_POLL_INTERVAL_MS = 150;
+// Allow zoomToBarsRange() to apply before reading back the actual visible range.
+const ZOOM_SETTLE_MS = 500;
 
 function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
     evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
     waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+    pollUntil: deps?.pollUntil || _pollUntil,
   };
 }
 
@@ -44,12 +56,20 @@ export async function setSymbol({ symbol, _deps }) {
       var chart = ${CHART_API};
       return new Promise(function(resolve) {
         chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
+        setTimeout(resolve, ${SYMBOL_SWITCH_SETTLE_MS});
       });
     })()
   `);
   const ready = await waitForChartReady(symbol);
-  return { success: true, symbol, chart_ready: ready };
+  if (!ready) {
+    return {
+      success: false,
+      error: 'Chart did not stabilize within timeout (symbol/timeframe may not have applied)',
+      chart_ready: false,
+      symbol,
+    };
+  }
+  return { success: true, symbol, chart_ready: true };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {
@@ -61,7 +81,15 @@ export async function setTimeframe({ timeframe, _deps }) {
     })()
   `);
   const ready = await waitForChartReady(null, timeframe);
-  return { success: true, timeframe, chart_ready: ready };
+  if (!ready) {
+    return {
+      success: false,
+      error: 'Chart did not stabilize within timeout (symbol/timeframe may not have applied)',
+      chart_ready: false,
+      timeframe,
+    };
+  }
+  return { success: true, timeframe, chart_ready: true };
 }
 
 export async function setType({ chart_type, _deps }) {
@@ -85,11 +113,40 @@ export async function setType({ chart_type, _deps }) {
 }
 
 export async function manageIndicator({ action, indicator, entity_id, inputs: inputsRaw, _deps }) {
-  const { evaluate } = _resolve(_deps);
-  const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  const { evaluate, pollUntil } = _resolve(_deps);
+  const inputs = parseJsonArg(inputsRaw, 'inputs');
 
   if (action === 'add') {
-    const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];
+    // TradingView's createStudy expects `inputs` as a POSITIONAL array of
+    // values, matching the study's declared input order. The {id, value}
+    // shape (used by Pine's applyOverrides) is silently accepted but never
+    // wired to the calculation engine — the study runs with default values
+    // while properties() reports the requested override, producing
+    // identical-looking-but-wrong series across multiple studies of the
+    // same type.
+    //
+    // Object inputs are inherently positionally ambiguous at add-time: the
+    // study's declared input order is only readable from its metaInfo AFTER
+    // the study is created, so we cannot reliably map a multi-key object to
+    // the correct positional slots before calling createStudy(). We therefore:
+    //   - accept arrays verbatim (already positional → exact), and
+    //   - accept a SINGLE-key object (unambiguous — one value, one slot), but
+    //   - REJECT multi-key objects with actionable guidance to pass an array,
+    //     rather than silently permuting positional inputs via Object.values.
+    let inputArr = [];
+    if (Array.isArray(inputs)) {
+      inputArr = inputs;
+    } else if (inputs && typeof inputs === 'object') {
+      const keys = Object.keys(inputs);
+      if (keys.length > 1) {
+        throw new Error(
+          `Ambiguous indicator inputs: an object with multiple keys (${keys.join(', ')}) ` +
+          `cannot be mapped to the study's declared positional input order at add-time. ` +
+          `Pass inputs as an ordered array of values instead (e.g. [20, "close"]).`
+        );
+      }
+      inputArr = Object.values(inputs);
+    }
     const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     await evaluate(`
       (function() {
@@ -97,8 +154,15 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
         chart.createStudy(${safeString(indicator)}, false, false, ${JSON.stringify(inputArr)});
       })()
     `);
-    await new Promise(r => setTimeout(r, 1500));
-    const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
+    const beforeCount = (before || []).length;
+    // Bounded poll: return as soon as the study list grows past its prior length,
+    // or give up after the same elapsed budget as the old fixed sleep.
+    let after = await pollUntil(async () => {
+      const ids = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
+      return (ids || []).length > beforeCount ? ids : null;
+    }, { interval: STUDY_ADD_POLL_INTERVAL_MS, timeout: STUDY_ADD_SETTLE_MS });
+    // On timeout, fall back to a final read so we still report whatever exists.
+    if (!after) after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     const newIds = (after || []).filter(id => !(before || []).includes(id));
     return { success: newIds.length > 0, action: 'add', indicator, entity_id: newIds[0] || null, new_study_count: newIds.length };
   } else if (action === 'remove') {
@@ -146,7 +210,7 @@ export async function setVisibleRange({ from, to, _deps }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, ZOOM_SETTLE_MS));
   const actual = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -192,7 +256,7 @@ export async function scrollToDate({ date }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, ZOOM_SETTLE_MS));
   return { success: true, date, centered_on: timestamp, resolution, window: { from, to } };
 }
 

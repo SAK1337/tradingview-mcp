@@ -2,9 +2,23 @@
  * Core pane/layout management logic.
  * Controls multi-chart layouts (split panes) in TradingView.
  */
-import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString } from '../connection.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+  };
+}
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
+
+// Wait for setLayout() to rebuild the pane grid before reading it back.
+const LAYOUT_SETTLE_MS = 500;
+// After focusing a pane, wait for it to become the active chart before setSymbol.
+const PANE_FOCUS_SETTLE_MS = 300;
+// Wait after setSymbol() for the page-side callback to fire.
+const SYMBOL_SWITCH_SETTLE_MS = 500;
 
 const LAYOUT_NAMES = {
   's': '1 chart',
@@ -30,7 +44,8 @@ const LAYOUT_NAMES = {
 /**
  * List all panes in the current layout with their symbols and index.
  */
-export async function list() {
+export async function list({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var cwc = ${CWC};
@@ -79,7 +94,8 @@ export async function list() {
  * Set the chart layout grid.
  * @param {string} layout - Layout code: s, 2h, 2v, 2-1, 1-2, 3h, 3v, 4, 6, 8, etc.
  */
-export async function setLayout({ layout }) {
+export async function setLayout({ layout, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
   const code = layout.toLowerCase().replace(/\s+/g, '');
 
   // Map friendly names to codes
@@ -97,9 +113,9 @@ export async function setLayout({ layout }) {
   }
 
   await evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, LAYOUT_SETTLE_MS));
 
-  const state = await list();
+  const state = await list({ _deps });
   return {
     success: true,
     layout: resolved,
@@ -112,7 +128,8 @@ export async function setLayout({ layout }) {
 /**
  * Focus a specific pane by index.
  */
-export async function focus({ index }) {
+export async function focus({ index, _deps }) {
+  const { evaluate } = _resolve(_deps);
   const idx = Number(index);
   const result = await evaluate(`
     (function() {
@@ -134,12 +151,13 @@ export async function focus({ index }) {
  * Set the symbol on a specific pane by index.
  * Works by focusing the pane, then using the active chart's setSymbol.
  */
-export async function setSymbol({ index, symbol }) {
+export async function setSymbol({ index, symbol, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
   const idx = Number(index);
 
   // Focus the target pane first
-  await focus({ index: idx });
-  await new Promise(r => setTimeout(r, 300));
+  await focus({ index: idx, _deps });
+  await new Promise(r => setTimeout(r, PANE_FOCUS_SETTLE_MS));
 
   // Now set symbol on the now-active chart
   await evaluateAsync(`
@@ -147,7 +165,7 @@ export async function setSymbol({ index, symbol }) {
       var chart = window.TradingViewApi._activeChartWidgetWV.value();
       return new Promise(function(resolve) {
         chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
+        setTimeout(resolve, ${SYMBOL_SWITCH_SETTLE_MS});
       });
     })()
   `);

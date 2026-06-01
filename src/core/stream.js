@@ -2,17 +2,75 @@
  * Core streaming logic — real-time JSONL output from TradingView.
  * Uses efficient poll + dedup: only emits when data changes.
  */
-import { evaluate } from '../connection.js';
+import { evaluate as _evaluate, KNOWN_PATHS } from '../connection.js';
 
-const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+function _resolve(deps) {
+  return { evaluate: deps?.evaluate || _evaluate };
+}
+
+const CHART_API = KNOWN_PATHS.chartApi;
 const MODEL = `${CHART_API}._chartWidget.model()`;
+
+// Backoff / escalation tuning for repeated CDP errors.
+const ERROR_BACKOFF_BASE = 1000;   // first retry delay
+const ERROR_BACKOFF_CAP = 30000;   // max retry delay
+const ERROR_ESCALATE_AFTER = 10;   // consecutive failures before we surface one error
+
+/**
+ * A no-op sink: when a stream is invoked WITHOUT an explicit sink (e.g. from the
+ * MCP stdio path) nothing is written to the process stdio streams, which would
+ * otherwise corrupt the MCP protocol.
+ */
+const NOOP_SINK = { out() {}, err() {} };
+
+/**
+ * Cheap default dedup fingerprint. For a plain object it joins the top-level
+ * primitive values plus the key count — far cheaper than serializing the whole
+ * (often nested) payload, and good enough to detect "nothing changed" for the
+ * shallow streams. Arrays/objects nested inside are summarized by type+length
+ * so a structural change still flips the fingerprint; for variable-shape
+ * payloads callers pass a purpose-built fingerprint() instead.
+ */
+export function shallowFingerprint(data) {
+  if (data == null) return 'null';
+  if (typeof data !== 'object') return String(data);
+  if (Array.isArray(data)) return 'arr:' + data.length;
+  const keys = Object.keys(data);
+  let parts = 'n=' + keys.length;
+  for (const k of keys) {
+    const v = data[k];
+    if (v == null) parts += '|' + k + '=∅';
+    else if (typeof v === 'object') parts += '|' + k + '=' + (Array.isArray(v) ? 'arr' + v.length : 'obj' + Object.keys(v).length);
+    else parts += '|' + k + '=' + v;
+  }
+  return parts;
+}
+
+/**
+ * Resolves the fingerprint function for a stream: an explicit per-stream
+ * fingerprint wins; otherwise the shallow default. Exported for testing.
+ */
+export function fingerprintFor(fn) {
+  return typeof fn === 'function' ? fn : shallowFingerprint;
+}
 
 /**
  * Generic poll-and-diff loop.
  * Calls fetcher(), compares to last value, emits JSONL on change.
- * Writes to stdout directly for pipe-friendliness.
+ *
+ * Output is routed exclusively through the injected `sink` ({ out, err }). When no
+ * sink is provided it defaults to NOOP_SINK so the function is safe to call off the
+ * CLI path (e.g. the MCP stdio transport). The CLI consumer passes writers backed
+ * by process.stdout/stderr to preserve the pipe-friendly JSONL behaviour.
+ *
+ * Dedup uses a cheap per-stream `fingerprint(data) => string` (defaults to a
+ * shallow fingerprint) instead of re-serializing the whole payload every cycle.
+ * The emitted JSONL line is serialized exactly once, on emit.
  */
-async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream' } = {}) {
+async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream', sink, fingerprint } = {}) {
+  const out = sink?.out ?? NOOP_SINK.out;
+  const err = sink?.err ?? NOOP_SINK.err;
+  const fp = fingerprintFor(fingerprint);
   let lastHash = null;
   let running = true;
 
@@ -22,35 +80,47 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
 
   // Emit header with compliance notice
   const start = Date.now();
-  process.stderr.write(`\u26A0  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n`);
-  process.stderr.write(`   Streams from your locally running TradingView Desktop instance only.\n`);
-  process.stderr.write(`   Does not connect to TradingView servers. Requires --remote-debugging-port=9222.\n`);
-  process.stderr.write(`   Ensure your usage complies with TradingView's Terms of Use.\n`);
-  process.stderr.write(`[stream:${label}] started, interval=${interval}ms, Ctrl+C to stop\n`);
+  err(`\u26A0  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n`);
+  err(`   Streams from your locally running TradingView Desktop instance only.\n`);
+  err(`   Does not connect to TradingView servers. Requires --remote-debugging-port=9222.\n`);
+  err(`   Ensure your usage complies with TradingView's Terms of Use.\n`);
+  err(`[stream:${label}] started, interval=${interval}ms, Ctrl+C to stop\n`);
+
+  let consecutiveErrors = 0;
+  let escalated = false;
 
   while (running) {
     try {
       const data = await fetcher();
+      consecutiveErrors = 0;
+      escalated = false;
       if (!data) { await sleep(interval); continue; }
 
-      const hash = dedupe ? JSON.stringify(data) : null;
+      const hash = dedupe ? fp(data) : null;
       if (!dedupe || hash !== lastHash) {
         lastHash = hash;
+        // Single serialization on emit (no second stringify for the dedup hash).
         const line = JSON.stringify({ ...data, _ts: Date.now(), _stream: label });
-        process.stdout.write(line + '\n');
+        out(line + '\n');
       }
-    } catch (err) {
-      // Connection errors — retry silently
-      if (/CDP|ECONNREFUSED/i.test(err.message)) {
-        await sleep(2000);
+    } catch (e) {
+      // Connection errors — back off exponentially instead of retrying silently forever.
+      if (/CDP|ECONNREFUSED/i.test(e.message)) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= ERROR_ESCALATE_AFTER && !escalated) {
+          escalated = true;
+          err(`[stream:${label}] CDP unavailable after ${consecutiveErrors} consecutive attempts: ${e.message}\n`);
+        }
+        const delay = Math.min(ERROR_BACKOFF_BASE * Math.pow(2, consecutiveErrors - 1), ERROR_BACKOFF_CAP);
+        await sleep(delay);
         continue;
       }
-      process.stderr.write(`[stream:${label}] error: ${err.message}\n`);
+      err(`[stream:${label}] error: ${e.message}\n`);
     }
     await sleep(interval);
   }
 
-  process.stderr.write(`[stream:${label}] stopped after ${((Date.now() - start) / 1000).toFixed(1)}s\n`);
+  err(`[stream:${label}] stopped after ${((Date.now() - start) / 1000).toFixed(1)}s\n`);
   process.removeListener('SIGINT', cleanup);
   process.removeListener('SIGTERM', cleanup);
 }
@@ -59,7 +129,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Stream: quote ──
 
-async function fetchQuote() {
+async function fetchQuote(evaluate) {
   return evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -81,13 +151,18 @@ async function fetchQuote() {
   `);
 }
 
-export async function streamQuote({ interval } = {}) {
-  return pollLoop(fetchQuote, { interval: interval || 300, label: 'quote' });
+// Per-stream fingerprints (cheap, no full stringify). Exported for testing.
+export const fpQuote = (d) => d ? `${d.time}:${d.close}:${d.volume}` : 'null';
+export const fpBars = (d) => d ? `${d.bar_time}:${d.close}:${d.volume}` : 'null';
+
+export async function streamQuote({ interval, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchQuote(evaluate), { interval: interval || 300, label: 'quote', sink, fingerprint: fpQuote });
 }
 
 // ── Stream: ohlcv (last N bars, emits on new bar) ──
 
-async function fetchLastBar() {
+async function fetchLastBar(evaluate) {
   return evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -111,13 +186,14 @@ async function fetchLastBar() {
   `);
 }
 
-export async function streamBars({ interval } = {}) {
-  return pollLoop(fetchLastBar, { interval: interval || 500, label: 'bars' });
+export async function streamBars({ interval, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchLastBar(evaluate), { interval: interval || 500, label: 'bars', sink, fingerprint: fpBars });
 }
 
 // ── Stream: indicator values ──
 
-async function fetchValues() {
+async function fetchValues(evaluate) {
   return evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -145,13 +221,36 @@ async function fetchValues() {
   `);
 }
 
-export async function streamValues({ interval } = {}) {
-  return pollLoop(fetchValues, { interval: interval || 500, label: 'values' });
+/**
+ * Fingerprint for the {symbol, study_count, studies:[{name, values|levels|labels|tables}]}
+ * shape shared by the value/lines/labels/tables streams. A full JSON.stringify
+ * of nested studies would defeat the purpose, but the top-level shallow
+ * fingerprint misses changes WITHIN studies, so we hash symbol + each study's
+ * name and a compact summary of its payload. Still far cheaper than serializing
+ * the whole nested object every cycle (no string allocation for keys/braces).
+ */
+export function fpStudies(d) {
+  if (!d) return 'null';
+  let s = d.symbol + '#' + d.study_count;
+  const studies = d.studies || [];
+  for (const st of studies) {
+    s += '|' + (st.name || st.study || '');
+    if (st.values) { for (const k in st.values) s += ';' + k + '=' + st.values[k]; }
+    else if (st.levels) { s += ';L' + st.levels.join(','); }
+    else if (st.labels) { s += ';B' + st.labels.length; for (const lb of st.labels) s += '/' + lb.text + '@' + lb.price; }
+    else if (st.tables) { s += ';T' + st.tables.length; for (const t of st.tables) s += '/' + (t.rows ? t.rows.length : 0); }
+  }
+  return s;
+}
+
+export async function streamValues({ interval, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchValues(evaluate), { interval: interval || 500, label: 'values', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: pine lines ──
 
-async function fetchLines(studyFilter) {
+async function fetchLines(evaluate, studyFilter) {
   const filter = studyFilter ? JSON.stringify(studyFilter) : 'null';
   return evaluate(`
     (function() {
@@ -191,13 +290,14 @@ async function fetchLines(studyFilter) {
   `);
 }
 
-export async function streamLines({ interval, filter } = {}) {
-  return pollLoop(() => fetchLines(filter), { interval: interval || 1000, label: 'lines' });
+export async function streamLines({ interval, filter, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchLines(evaluate, filter), { interval: interval || 1000, label: 'lines', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: pine labels ──
 
-async function fetchLabels(studyFilter) {
+async function fetchLabels(evaluate, studyFilter) {
   const filterStr = studyFilter ? JSON.stringify(studyFilter) : 'null';
   return evaluate(`
     (function() {
@@ -234,13 +334,14 @@ async function fetchLabels(studyFilter) {
   `);
 }
 
-export async function streamLabels({ interval, filter } = {}) {
-  return pollLoop(() => fetchLabels(filter), { interval: interval || 1000, label: 'labels' });
+export async function streamLabels({ interval, filter, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchLabels(evaluate, filter), { interval: interval || 1000, label: 'labels', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: pine tables ──
 
-async function fetchTables(studyFilter) {
+async function fetchTables(evaluate, studyFilter) {
   const filterStr = studyFilter ? JSON.stringify(studyFilter) : 'null';
   return evaluate(`
     (function() {
@@ -284,15 +385,16 @@ async function fetchTables(studyFilter) {
   `);
 }
 
-export async function streamTables({ interval, filter } = {}) {
-  return pollLoop(() => fetchTables(filter), { interval: interval || 2000, label: 'tables' });
+export async function streamTables({ interval, filter, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchTables(evaluate, filter), { interval: interval || 2000, label: 'tables', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: all panes (multi-symbol) ──
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
 
-async function fetchAllPanes() {
+async function fetchAllPanes(evaluate) {
   return evaluate(`
     (function() {
       var cwc = ${CWC};
@@ -330,6 +432,14 @@ async function fetchAllPanes() {
   `);
 }
 
-export async function streamAllPanes({ interval } = {}) {
-  return pollLoop(fetchAllPanes, { interval: interval || 500, label: 'all-panes' });
+export function fpPanes(d) {
+  if (!d) return 'null';
+  let s = (d.layout || '') + '#' + d.pane_count;
+  for (const p of (d.panes || [])) s += '|' + p.index + ':' + (p.symbol || '') + ':' + p.time + ':' + p.close + ':' + p.volume + ':' + (p.error || '');
+  return s;
+}
+
+export async function streamAllPanes({ interval, sink, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  return pollLoop(() => fetchAllPanes(evaluate), { interval: interval || 500, label: 'all-panes', sink, fingerprint: fpPanes });
 }
