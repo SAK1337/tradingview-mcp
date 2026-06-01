@@ -20,6 +20,37 @@ const ERROR_ESCALATE_AFTER = 10;   // consecutive failures before we surface one
 const NOOP_SINK = { out() {}, err() {} };
 
 /**
+ * Cheap default dedup fingerprint. For a plain object it joins the top-level
+ * primitive values plus the key count — far cheaper than serializing the whole
+ * (often nested) payload, and good enough to detect "nothing changed" for the
+ * shallow streams. Arrays/objects nested inside are summarized by type+length
+ * so a structural change still flips the fingerprint; for variable-shape
+ * payloads callers pass a purpose-built fingerprint() instead.
+ */
+export function shallowFingerprint(data) {
+  if (data == null) return 'null';
+  if (typeof data !== 'object') return String(data);
+  if (Array.isArray(data)) return 'arr:' + data.length;
+  const keys = Object.keys(data);
+  let parts = 'n=' + keys.length;
+  for (const k of keys) {
+    const v = data[k];
+    if (v == null) parts += '|' + k + '=∅';
+    else if (typeof v === 'object') parts += '|' + k + '=' + (Array.isArray(v) ? 'arr' + v.length : 'obj' + Object.keys(v).length);
+    else parts += '|' + k + '=' + v;
+  }
+  return parts;
+}
+
+/**
+ * Resolves the fingerprint function for a stream: an explicit per-stream
+ * fingerprint wins; otherwise the shallow default. Exported for testing.
+ */
+export function fingerprintFor(fn) {
+  return typeof fn === 'function' ? fn : shallowFingerprint;
+}
+
+/**
  * Generic poll-and-diff loop.
  * Calls fetcher(), compares to last value, emits JSONL on change.
  *
@@ -27,10 +58,15 @@ const NOOP_SINK = { out() {}, err() {} };
  * sink is provided it defaults to NOOP_SINK so the function is safe to call off the
  * CLI path (e.g. the MCP stdio transport). The CLI consumer passes writers backed
  * by process.stdout/stderr to preserve the pipe-friendly JSONL behaviour.
+ *
+ * Dedup uses a cheap per-stream `fingerprint(data) => string` (defaults to a
+ * shallow fingerprint) instead of re-serializing the whole payload every cycle.
+ * The emitted JSONL line is serialized exactly once, on emit.
  */
-async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream', sink } = {}) {
+async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream', sink, fingerprint } = {}) {
   const out = sink?.out ?? NOOP_SINK.out;
   const err = sink?.err ?? NOOP_SINK.err;
+  const fp = fingerprintFor(fingerprint);
   let lastHash = null;
   let running = true;
 
@@ -56,9 +92,10 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
       escalated = false;
       if (!data) { await sleep(interval); continue; }
 
-      const hash = dedupe ? JSON.stringify(data) : null;
+      const hash = dedupe ? fp(data) : null;
       if (!dedupe || hash !== lastHash) {
         lastHash = hash;
+        // Single serialization on emit (no second stringify for the dedup hash).
         const line = JSON.stringify({ ...data, _ts: Date.now(), _stream: label });
         out(line + '\n');
       }
@@ -110,8 +147,12 @@ async function fetchQuote() {
   `);
 }
 
+// Per-stream fingerprints (cheap, no full stringify). Exported for testing.
+export const fpQuote = (d) => d ? `${d.time}:${d.close}:${d.volume}` : 'null';
+export const fpBars = (d) => d ? `${d.bar_time}:${d.close}:${d.volume}` : 'null';
+
 export async function streamQuote({ interval, sink } = {}) {
-  return pollLoop(fetchQuote, { interval: interval || 300, label: 'quote', sink });
+  return pollLoop(fetchQuote, { interval: interval || 300, label: 'quote', sink, fingerprint: fpQuote });
 }
 
 // ── Stream: ohlcv (last N bars, emits on new bar) ──
@@ -141,7 +182,7 @@ async function fetchLastBar() {
 }
 
 export async function streamBars({ interval, sink } = {}) {
-  return pollLoop(fetchLastBar, { interval: interval || 500, label: 'bars', sink });
+  return pollLoop(fetchLastBar, { interval: interval || 500, label: 'bars', sink, fingerprint: fpBars });
 }
 
 // ── Stream: indicator values ──
@@ -174,8 +215,30 @@ async function fetchValues() {
   `);
 }
 
+/**
+ * Fingerprint for the {symbol, study_count, studies:[{name, values|levels|labels|tables}]}
+ * shape shared by the value/lines/labels/tables streams. A full JSON.stringify
+ * of nested studies would defeat the purpose, but the top-level shallow
+ * fingerprint misses changes WITHIN studies, so we hash symbol + each study's
+ * name and a compact summary of its payload. Still far cheaper than serializing
+ * the whole nested object every cycle (no string allocation for keys/braces).
+ */
+export function fpStudies(d) {
+  if (!d) return 'null';
+  let s = d.symbol + '#' + d.study_count;
+  const studies = d.studies || [];
+  for (const st of studies) {
+    s += '|' + (st.name || st.study || '');
+    if (st.values) { for (const k in st.values) s += ';' + k + '=' + st.values[k]; }
+    else if (st.levels) { s += ';L' + st.levels.join(','); }
+    else if (st.labels) { s += ';B' + st.labels.length; for (const lb of st.labels) s += '/' + lb.text + '@' + lb.price; }
+    else if (st.tables) { s += ';T' + st.tables.length; for (const t of st.tables) s += '/' + (t.rows ? t.rows.length : 0); }
+  }
+  return s;
+}
+
 export async function streamValues({ interval, sink } = {}) {
-  return pollLoop(fetchValues, { interval: interval || 500, label: 'values', sink });
+  return pollLoop(fetchValues, { interval: interval || 500, label: 'values', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: pine lines ──
@@ -221,7 +284,7 @@ async function fetchLines(studyFilter) {
 }
 
 export async function streamLines({ interval, filter, sink } = {}) {
-  return pollLoop(() => fetchLines(filter), { interval: interval || 1000, label: 'lines', sink });
+  return pollLoop(() => fetchLines(filter), { interval: interval || 1000, label: 'lines', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: pine labels ──
@@ -264,7 +327,7 @@ async function fetchLabels(studyFilter) {
 }
 
 export async function streamLabels({ interval, filter, sink } = {}) {
-  return pollLoop(() => fetchLabels(filter), { interval: interval || 1000, label: 'labels', sink });
+  return pollLoop(() => fetchLabels(filter), { interval: interval || 1000, label: 'labels', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: pine tables ──
@@ -314,7 +377,7 @@ async function fetchTables(studyFilter) {
 }
 
 export async function streamTables({ interval, filter, sink } = {}) {
-  return pollLoop(() => fetchTables(filter), { interval: interval || 2000, label: 'tables', sink });
+  return pollLoop(() => fetchTables(filter), { interval: interval || 2000, label: 'tables', sink, fingerprint: fpStudies });
 }
 
 // ── Stream: all panes (multi-symbol) ──
@@ -359,6 +422,13 @@ async function fetchAllPanes() {
   `);
 }
 
+export function fpPanes(d) {
+  if (!d) return 'null';
+  let s = (d.layout || '') + '#' + d.pane_count;
+  for (const p of (d.panes || [])) s += '|' + p.index + ':' + (p.symbol || '') + ':' + p.time + ':' + p.close + ':' + p.volume + ':' + (p.error || '');
+  return s;
+}
+
 export async function streamAllPanes({ interval, sink } = {}) {
-  return pollLoop(fetchAllPanes, { interval: interval || 500, label: 'all-panes', sink });
+  return pollLoop(fetchAllPanes, { interval: interval || 500, label: 'all-panes', sink, fingerprint: fpPanes });
 }

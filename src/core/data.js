@@ -8,33 +8,59 @@ const MAX_TRADES = 20;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 
-function buildGraphicsJS(collectionName, mapKey, filter) {
-  return `
-    (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-      var model = chart.model();
-      var sources = model.model().dataSources();
-      var results = [];
-      var warnings = [];
-      var filter = ${safeString(filter || '')};
-      for (var si = 0; si < sources.length; si++) {
-        var s = sources[si];
+/**
+ * Pure helper: case-insensitive substring study-name match used by all
+ * pine-graphics readers and getStudyValues. Empty/absent filter matches all.
+ * Exported for unit testing the early-filter predicate without a CDP seam.
+ */
+export function studyMatchesFilter(name, filter) {
+  if (!filter) return true;
+  if (name == null) return false;
+  return String(name).toLowerCase().indexOf(String(filter).toLowerCase()) !== -1;
+}
+
+/**
+ * Pure helper: round a numeric study value to 2 decimals while KEEPING the
+ * `number` type (no `.toFixed` stringification). Non-finite numbers return null.
+ * Exported for unit testing.
+ */
+export function roundValue(v) {
+  if (typeof v !== 'number') return v;
+  if (!isFinite(v)) return null;
+  return Math.round(v * 100) / 100;
+}
+
+// Map of pine-graphics primitive types → their (collection, mapKey) addresses
+// in study._graphics._primitivesCollection. Used by buildGraphicsJS and
+// buildAllGraphicsJS so the single-round-trip helper and per-reader helpers
+// stay in sync.
+const GRAPHICS_KINDS = {
+  lines: { collection: 'dwglines', mapKey: 'lines' },
+  labels: { collection: 'dwglabels', mapKey: 'labels' },
+  tables: { collection: 'dwgtablecells', mapKey: 'tableCells' },
+  boxes: { collection: 'dwgboxes', mapKey: 'boxes' },
+};
+
+// JS snippet (statements) shared by buildGraphicsJS / buildAllGraphicsJS that
+// performs the EARLY case-insensitive filter on a source `s` and, on a match,
+// resolves the study display name into `name`. Emits `continue` for skips so
+// non-matching studies never reach the deep primitive walk.
+const GRAPHICS_SOURCE_PRELUDE = `
         if (!s.metaInfo) continue;
-        var sName = '';
-        try {
-          var meta = s.metaInfo();
-          var name = meta.description || meta.shortDescription || '';
-          sName = name;
-          if (!name) continue;
-          if (filter && name.indexOf(filter) === -1) continue;
-          var g = s._graphics;
-          if (!g || !g._primitivesCollection) continue;
-          var pc = g._primitivesCollection;
+        var meta = s.metaInfo();
+        var name = meta.description || meta.shortDescription || '';
+        if (!name) continue;
+        if (filter && name.toLowerCase().indexOf(filter.toLowerCase()) === -1) continue;`;
+
+// JS snippet that, given `pc` (primitivesCollection), `collName`, `mapKey`,
+// and a `name` (for warnings), pushes parsed primitives into `items`.
+function graphicsExtractSnippet() {
+  return `
           var items = [];
           try {
-            var outer = pc.${collectionName};
+            var outer = pc[collName];
             if (outer) {
-              var inner = outer.get('${mapKey}');
+              var inner = outer.get(mapKey);
               if (inner) {
                 var coll = inner.get(false);
                 if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
@@ -43,7 +69,7 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
               }
             }
           } catch(e) { warnings.push({study: name, reason: 'primitives parse failed: ' + (e && e.message ? e.message : String(e))}); }
-          if (items.length === 0 && '${collectionName}' === 'dwgtablecells') {
+          if (items.length === 0 && collName === 'dwgtablecells') {
             try {
               var tcOuter = pc.dwgtablecells;
               if (tcOuter) {
@@ -53,13 +79,108 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
                 }
               }
             } catch(e) { warnings.push({study: name, reason: 'tableCells parse failed: ' + (e && e.message ? e.message : String(e))}); }
-          }
+          }`;
+}
+
+function buildGraphicsJS(collectionName, mapKey, filter) {
+  return `
+    (function() {
+      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var model = chart.model();
+      var sources = model.model().dataSources();
+      var results = [];
+      var warnings = [];
+      var filter = ${safeString(filter || '')};
+      var collName = ${safeString(collectionName)};
+      var mapKey = ${safeString(mapKey)};
+      for (var si = 0; si < sources.length; si++) {
+        var s = sources[si];
+        // EARLY FILTER: skip non-matching studies before reading _graphics.
+        ${GRAPHICS_SOURCE_PRELUDE}
+        try {
+          var g = s._graphics;
+          if (!g || !g._primitivesCollection) continue;
+          var pc = g._primitivesCollection;
+          ${graphicsExtractSnippet()}
           if (items.length > 0) results.push({name: name, count: items.length, items: items});
-        } catch(e) { warnings.push({study: sName || 'unknown', reason: 'study scan failed: ' + (e && e.message ? e.message : String(e))}); }
+        } catch(e) { warnings.push({study: name || 'unknown', reason: 'study scan failed: ' + (e && e.message ? e.message : String(e))}); }
       }
       return { results: results, warnings: warnings };
     })()
   `;
+}
+
+/**
+ * Builds a single evaluate() payload that extracts ALL four primitive types
+ * ({lines, labels, tables, boxes}) for the (filtered) studies in ONE CDP
+ * round-trip. The early filter runs once per source; the deep primitive walk
+ * runs once per matched study (four kinds, no extra source iteration).
+ */
+function buildAllGraphicsJS(filter) {
+  return `
+    (function() {
+      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var model = chart.model();
+      var sources = model.model().dataSources();
+      var KINDS = ${JSON.stringify(GRAPHICS_KINDS)};
+      var out = { lines: [], labels: [], tables: [], boxes: [] };
+      var warnings = [];
+      var filter = ${safeString(filter || '')};
+      for (var si = 0; si < sources.length; si++) {
+        var s = sources[si];
+        // EARLY FILTER: skip non-matching studies before reading _graphics.
+        ${GRAPHICS_SOURCE_PRELUDE}
+        try {
+          var g = s._graphics;
+          if (!g || !g._primitivesCollection) continue;
+          var pc = g._primitivesCollection;
+          for (var kind in KINDS) {
+            if (!KINDS.hasOwnProperty(kind)) continue;
+            var collName = KINDS[kind].collection;
+            var mapKey = KINDS[kind].mapKey;
+            ${graphicsExtractSnippet()}
+            if (items.length > 0) out[kind].push({name: name, count: items.length, items: items});
+          }
+        } catch(e) { warnings.push({study: name || 'unknown', reason: 'study scan failed: ' + (e && e.message ? e.message : String(e))}); }
+      }
+      return { lines: out.lines, labels: out.labels, tables: out.tables, boxes: out.boxes, warnings: warnings };
+    })()
+  `;
+}
+
+/**
+ * INTERNAL helper: fetch all four pine-graphics primitive types for the
+ * (optionally filtered) studies in a single CDP evaluate(). Returns the raw
+ * per-type arrays plus the collected warnings, so a caller that needs more
+ * than one type (e.g. a full report pass) pays for ONE round-trip instead of
+ * four. The four public readers below remain thin per-type wrappers for
+ * backward compatibility, but can be re-pointed at this when only one
+ * round-trip is desired.
+ */
+export async function getAllGraphics({ study_filter } = {}) {
+  const payload = await evaluate(buildAllGraphicsJS(study_filter || ''));
+  return {
+    lines: payload?.lines || [],
+    labels: payload?.labels || [],
+    tables: payload?.tables || [],
+    boxes: payload?.boxes || [],
+    warnings: payload?.warnings || [],
+  };
+}
+
+/**
+ * Splits a single getAllGraphics() result into the same per-type tool outputs
+ * the four readers return, in one round-trip. Warnings are attached to each
+ * slice so `_warnings` behavior is preserved per type.
+ */
+export async function getAllGraphicsShaped({ study_filter, max_labels, verbose } = {}) {
+  const all = await getAllGraphics({ study_filter });
+  return {
+    lines: shapeLines(all.lines, all.warnings, { verbose }),
+    labels: shapeLabels(all.labels, all.warnings, { max_labels, verbose }),
+    tables: shapeTables(all.tables, all.warnings),
+    boxes: shapeBoxes(all.boxes, all.warnings, { verbose }),
+  };
 }
 
 export async function getOhlcv({ count, summary } = {}) {
@@ -352,7 +473,7 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues() {
+export async function getStudyValues({ study_filter } = {}) {
   // Reads the LAST BAR value of every plot in every study, directly from
   // each study's computed series. We deliberately don't use dataWindowView()
   // here — that path mirrors the on-screen "Data Window" sidebar, which only
@@ -367,8 +488,11 @@ export async function getStudyValues() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value();
       var studies = chart.getAllStudies();
       var results = [];
+      var filter = ${safeString(study_filter || '')};
       for (var i = 0; i < studies.length; i++) {
         var meta = studies[i];
+        // EARLY FILTER: skip non-matching studies before reading series data.
+        if (filter && (meta.name || '').toLowerCase().indexOf(filter.toLowerCase()) === -1) continue;
         try {
           var s = chart.getStudyById(meta.id);
           if (!s || !s._study) continue;
@@ -399,7 +523,10 @@ export async function getStudyValues() {
             var title = (style && style.title) || plot.id;
             if (typeof v === 'number') {
               if (!isFinite(v)) continue;
-              v = (Math.round(v * 100) / 100).toFixed(2);
+              // Return a NUMBER (rounded to 2 decimals), not a .toFixed string,
+              // so consumers don't have to re-parse. BREAKING change vs prior
+              // stringified output.
+              v = Math.round(v * 100) / 100;
             }
             values[title] = v;
           }
@@ -414,13 +541,12 @@ export async function getStudyValues() {
   return { success: true, study_count: data?.length || 0, studies: data || [] };
 }
 
-export async function getPineLines({ study_filter, verbose } = {}) {
-  const filter = study_filter || '';
-  const payload = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
-  const raw = payload?.results || [];
-  const warnings = payload?.warnings || [];
-  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
+// ── Pure shapers: turn raw {name, count, items} arrays into tool output. ──
+// Shared by the per-type readers AND by getAllGraphics consumers so a single
+// round-trip can be split client-side with identical output shape.
 
+export function shapeLines(raw, warnings = [], { verbose } = {}) {
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
   const studies = raw.map(s => {
     const hLevels = [];
     const seen = {};
@@ -440,13 +566,13 @@ export async function getPineLines({ study_filter, verbose } = {}) {
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
-  const filter = study_filter || '';
-  const payload = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
-  const raw = payload?.results || [];
-  const warnings = payload?.warnings || [];
-  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
+export async function getPineLines({ study_filter, verbose } = {}) {
+  const payload = await evaluate(buildGraphicsJS('dwglines', 'lines', study_filter || ''));
+  return shapeLines(payload?.results || [], payload?.warnings || [], { verbose });
+}
 
+export function shapeLabels(raw, warnings = [], { max_labels, verbose } = {}) {
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
   const limit = max_labels || 50;
   const studies = raw.map(s => {
     let labels = s.items.map(item => {
@@ -462,13 +588,13 @@ export async function getPineLabels({ study_filter, max_labels, verbose } = {}) 
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineTables({ study_filter } = {}) {
-  const filter = study_filter || '';
-  const payload = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
-  const raw = payload?.results || [];
-  const warnings = payload?.warnings || [];
-  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
+export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
+  const payload = await evaluate(buildGraphicsJS('dwglabels', 'labels', study_filter || ''));
+  return shapeLabels(payload?.results || [], payload?.warnings || [], { max_labels, verbose });
+}
 
+export function shapeTables(raw, warnings = []) {
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
   const studies = raw.map(s => {
     const tables = {};
     for (const item of s.items) {
@@ -492,13 +618,13 @@ export async function getPineTables({ study_filter } = {}) {
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
 }
 
-export async function getPineBoxes({ study_filter, verbose } = {}) {
-  const filter = study_filter || '';
-  const payload = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
-  const raw = payload?.results || [];
-  const warnings = payload?.warnings || [];
-  if (raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
+export async function getPineTables({ study_filter } = {}) {
+  const payload = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', study_filter || ''));
+  return shapeTables(payload?.results || [], payload?.warnings || []);
+}
 
+export function shapeBoxes(raw, warnings = [], { verbose } = {}) {
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ...(warnings.length && { _warnings: warnings }) };
   const studies = raw.map(s => {
     const zones = [];
     const seen = {};
@@ -516,4 +642,9 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
     return result;
   });
   return { success: true, study_count: studies.length, studies, ...(warnings.length && { _warnings: warnings }) };
+}
+
+export async function getPineBoxes({ study_filter, verbose } = {}) {
+  const payload = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', study_filter || ''));
+  return shapeBoxes(payload?.results || [], payload?.warnings || [], { verbose });
 }
