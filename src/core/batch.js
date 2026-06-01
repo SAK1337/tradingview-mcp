@@ -3,12 +3,9 @@
  */
 import { evaluate, evaluateAsync, getClient, getChartApi, getChartCollection, safeString } from '../connection.js';
 import { waitForChartReady } from '../wait.js';
-import { writeFileSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
+import { SCREENSHOT_DIR, safeScreenshotName, pruneScreenshots } from './capture.js';
+import { writeFile, mkdir } from 'fs/promises';
+import { join } from 'path';
 
 // Default per-symbol settle delay after chart-ready, giving studies/indicators
 // time to finish rendering before the action (screenshot/export) runs.
@@ -49,6 +46,9 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
   try { colPath = await getChartCollection(); } catch {}
   try { apiPath = await getChartApi(); } catch {}
 
+  // Ensure the screenshot dir exists once, before the loop — not per iteration.
+  if (action === 'screenshot') await mkdir(SCREENSHOT_DIR, { recursive: true });
+
   for (const symbol of symbols) {
     for (const tf of tfs) {
       const combo = { symbol, timeframe: tf };
@@ -74,14 +74,15 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
 
         let actionResult;
         if (action === 'screenshot') {
-          mkdirSync(SCREENSHOT_DIR, { recursive: true });
           const client = await getClient();
           const { data } = await client.Page.captureScreenshot({ format: 'png' });
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const fname = `batch_${symbol}_${tf || 'default'}_${ts}`.replace(/[\/\\]/g, '_') + '.png';
+          const fname = safeScreenshotName(`batch_${symbol}_${tf || 'default'}_${ts}`) + '.png';
           const filePath = join(SCREENSHOT_DIR, fname);
-          writeFileSync(filePath, Buffer.from(data, 'base64'));
-          actionResult = { file_path: filePath };
+          // Decode the base64 payload once; reuse the buffer for the async write.
+          const buffer = Buffer.from(data, 'base64');
+          await writeFile(filePath, buffer);
+          actionResult = { file_path: filePath, size_bytes: buffer.length };
         } else if (action === 'get_ohlcv' && apiPath) {
           const limit = Math.min(ohlcv_count || 100, 500);
           actionResult = await evaluateAsync(`
@@ -117,6 +118,11 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
         results.push({ ...combo, success: false, error: err.message });
       }
     }
+  }
+
+  // Enforce screenshot retention once after the sweep, not inside the loop.
+  if (action === 'screenshot') {
+    try { await pruneScreenshots(); } catch {}
   }
 
   const successCount = results.filter(r => r.success).length;
