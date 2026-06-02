@@ -18,7 +18,7 @@
 - [x] 3.2 Wire the smoke test into `prepublishOnly` (`npm run test:unit && npm run test:smoke`).
 
 ## 4. Verify
-- [ ] 4.1 Confirm `npx -y @specialagentk/tradingview-mcp` launches the server on macOS, Linux, and
-      Volta-managed Node on Windows. (Requires publishing the single-bin version; the local
-      `test:smoke` already proves the packed tarball installs and its bin launches.)
+- [x] 4.1 Confirm `npx -y @specialagentk/tradingview-mcp` launches the server. Verified against the
+      published 3.0.0 on Volta-managed Node on Windows — the exact prior failure case now launches
+      cleanly; macOS/Linux rely on the same single-bin resolution.
 - [x] 4.2 `openspec validate fix-npm-install-resolution --strict`.
