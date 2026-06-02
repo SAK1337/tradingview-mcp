@@ -174,10 +174,10 @@ Each prompt is self-contained and reflects that chart's specific indicator layou
 
 Every prompt follows the same 8-step pipeline:
 
-1. **Verify CDP connection** (`node src/cli/index.js status`). If broken, use the `launch-tradingview` skill.
+1. **Verify CDP connection** (`node src/bin.js cli status`). If broken, use the `launch-tradingview` skill.
 2. **Inspect chart state** — if it matches the prompt's expected indicator/timeframe/chart-type set, skip step 3.
 3. **Set up the chart** (only if needed) — add missing built-in MAs. **Do not programmatically re-add commercial studies** (MarketCipher, Prophesier, Prophet, Sibyl) — they hold the user's hand-tuned settings.
-4. **Gather data** — quote, OHLCV summary, indicator values, Prophesier v6.10 MTF RSI table (if present), pine labels/lines/boxes, user drawings. Send `node src/cli/index.js ui keyboard --key Escape` first to dismiss any MarketCipher alert dialogs that may have popped open.
+4. **Gather data** — quote, OHLCV summary, indicator values, Prophesier v6.10 MTF RSI table (if present), pine labels/lines/boxes, user drawings. Send `node src/bin.js cli ui keyboard --key Escape` first to dismiss any MarketCipher alert dialogs that may have popped open.
 5. **Zoom + screenshot** — each prompt specifies a different zoom range (30 days for SOL daily, 30 weeks for SOL weekly, 60 days for HYPE, 120 days for BTC, 120 days for ETH).
 6. **Build the HTML report** — uses a placeholder `__CHART_B64__` for the embedded screenshot to keep the 300+ KB base64 out of LLM context. Inject via PowerShell:
    ```powershell
@@ -214,7 +214,7 @@ Then re-run `html_to_pdf.py` to regenerate the PDF.
 ### Adding a new report symbol
 
 To add a new symbol (e.g., `LINKUSDT.txt`):
-1. Switch the chart to the symbol (`node src/cli/index.js symbol "BINANCE:LINKUSDT"`) and let the user verify their preferred indicator/MA setup.
+1. Switch the chart to the symbol (`node src/bin.js cli symbol "BINANCE:LINKUSDT"`) and let the user verify their preferred indicator/MA setup.
 2. Run `state`, `draw list`, `values`, and `data tables` to capture the actual indicator suite.
 3. Copy the closest existing prompt (HYPE for daily-HA, BTC for daily-regular-candles, SOL for weekly) and adapt:
    - Update symbol, timeframe, chart type expectations
