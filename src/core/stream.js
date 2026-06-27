@@ -3,6 +3,7 @@
  * Uses efficient poll + dedup: only emits when data changes.
  */
 import { evaluate as _evaluate, KNOWN_PATHS } from '../connection.js';
+import { buildGraphicsJS, buildStudyValuesJS, shapeLines, shapeLabels } from './data.js';
 
 function _resolve(deps) {
   return { evaluate: deps?.evaluate || _evaluate };
@@ -11,10 +12,34 @@ function _resolve(deps) {
 const CHART_API = KNOWN_PATHS.chartApi;
 const MODEL = `${CHART_API}._chartWidget.model()`;
 
-// Backoff / escalation tuning for repeated CDP errors.
+// Backoff / escalation tuning for repeated errors.
 const ERROR_BACKOFF_BASE = 1000;   // first retry delay
 const ERROR_BACKOFF_CAP = 30000;   // max retry delay
 const ERROR_ESCALATE_AFTER = 10;   // consecutive failures before we surface one error
+// Non-transport errors (e.g. a moved API path) won't self-heal the way a dropped
+// CDP socket can, so after this many consecutive non-transport failures the loop
+// terminates instead of logging at the base interval forever. Generous, so a
+// transient page hiccup doesn't kill an otherwise-healthy stream.
+const ERROR_TERMINATE_AFTER = 20;
+
+/**
+ * Pure decision for the poll loop's error handling, exported for offline tests.
+ * Applies to EVERY caught error (not just transport): returns the backoff delay,
+ * whether to surface a one-time escalation, and whether to terminate. Transport
+ * errors (CDP/ECONNREFUSED) back off but never terminate — they may self-heal when
+ * TradingView restarts; a persistent non-transport error terminates after
+ * ERROR_TERMINATE_AFTER so a moved API path can't spin an unbounded log loop.
+ */
+export function streamErrorAction(message, consecutiveErrors) {
+  const transport = /CDP|ECONNREFUSED/i.test(message || '');
+  const delay = Math.min(ERROR_BACKOFF_BASE * Math.pow(2, consecutiveErrors - 1), ERROR_BACKOFF_CAP);
+  return {
+    transport,
+    escalate: consecutiveErrors >= ERROR_ESCALATE_AFTER,
+    terminate: !transport && consecutiveErrors >= ERROR_TERMINATE_AFTER,
+    delay,
+  };
+}
 
 /**
  * A no-op sink: when a stream is invoked WITHOUT an explicit sink (e.g. from the
@@ -104,18 +129,20 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
         out(line + '\n');
       }
     } catch (e) {
-      // Connection errors — back off exponentially instead of retrying silently forever.
-      if (/CDP|ECONNREFUSED/i.test(e.message)) {
-        consecutiveErrors++;
-        if (consecutiveErrors >= ERROR_ESCALATE_AFTER && !escalated) {
-          escalated = true;
-          err(`[stream:${label}] CDP unavailable after ${consecutiveErrors} consecutive attempts: ${e.message}\n`);
-        }
-        const delay = Math.min(ERROR_BACKOFF_BASE * Math.pow(2, consecutiveErrors - 1), ERROR_BACKOFF_CAP);
-        await sleep(delay);
-        continue;
+      // Bound EVERY persistent error (not just transport): back off exponentially
+      // instead of logging at the base interval forever.
+      consecutiveErrors++;
+      const action = streamErrorAction(e.message, consecutiveErrors);
+      if (action.escalate && !escalated) {
+        escalated = true;
+        err(`[stream:${label}] ${action.transport ? 'CDP unavailable' : 'persistent error'} after ${consecutiveErrors} consecutive attempts: ${e.message}\n`);
       }
-      err(`[stream:${label}] error: ${e.message}\n`);
+      if (action.terminate) {
+        err(`[stream:${label}] giving up after ${consecutiveErrors} consecutive non-transport errors (e.g. moved API path): ${e.message}\n`);
+        break;
+      }
+      await sleep(action.delay);
+      continue;
     }
     await sleep(interval);
   }
@@ -193,32 +220,14 @@ export async function streamBars({ interval, sink, _deps } = {}) {
 
 // ── Stream: indicator values ──
 
-async function fetchValues(evaluate) {
-  return evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      var m = ${MODEL};
-      var studies = chart.getAllStudies();
-      var results = [];
-      for (var i = 0; i < studies.length; i++) {
-        try {
-          var study = chart.getStudyById(studies[i].id);
-          if (!study || !study.isVisible()) continue;
-          var src = study._study || study;
-          var data = src._lastBarValues || src._data;
-          if (!data) continue;
-          var vals = {};
-          if (typeof data === 'object') {
-            for (var k in data) {
-              if (typeof data[k] === 'number' && !isNaN(data[k])) vals[k] = data[k];
-            }
-          }
-          if (Object.keys(vals).length > 0) results.push({ name: studies[i].name, values: vals });
-        } catch(e) {}
-      }
-      return { symbol: chart.symbol(), study_count: results.length, studies: results };
-    })()
-  `);
+// Reuses data.js's buildStudyValuesJS (the deterministic `_study.data()._items`
+// path) so streamed values match data_get_study_values for the same chart state.
+// The old `_lastBarValues || _data` path was empty/stale for headless callers.
+// `symbol` is read alongside the data in the SAME round-trip via the wrapper.
+export async function fetchValues(evaluate, studyFilter) {
+  const r = await evaluate(`({ symbol: ${CHART_API}.symbol(), data: ${buildStudyValuesJS(studyFilter || '')} })`);
+  const studies = (r?.data || []).map(s => ({ name: s.name, values: s.values }));
+  return { symbol: r?.symbol, study_count: studies.length, studies };
 }
 
 /**
@@ -250,44 +259,17 @@ export async function streamValues({ interval, sink, _deps } = {}) {
 
 // ── Stream: pine lines ──
 
-async function fetchLines(evaluate, studyFilter) {
-  const filter = studyFilter ? JSON.stringify(studyFilter) : 'null';
-  return evaluate(`
-    (function() {
-      var filter = ${filter};
-      var chart = ${CHART_API};
-      var studies = chart.getAllStudies();
-      var results = [];
-      for (var i = 0; i < studies.length; i++) {
-        var s = studies[i];
-        if (filter && (s.name || '').toLowerCase().indexOf(filter.toLowerCase()) === -1) continue;
-        try {
-          var study = chart.getStudyById(s.id);
-          if (!study) continue;
-          var src = study._study || study;
-          var g = src._graphics || (src._source && src._source._graphics);
-          if (!g) continue;
-          var pc = g._primitivesCollection;
-          if (!pc || !pc.dwglines) continue;
-          var linesMap = pc.dwglines.get('lines');
-          if (!linesMap) continue;
-          var data = linesMap.get(false);
-          if (!data || !data._primitivesDataById) continue;
-          var levels = [];
-          var seen = {};
-          data._primitivesDataById.forEach(function(line) {
-            var p1 = line.points && line.points[0] ? line.points[0].price : null;
-            var p2 = line.points && line.points[1] ? line.points[1].price : null;
-            var price = (p1 !== null && p1 === p2) ? p1 : (p1 || p2);
-            if (price !== null && !seen[price]) { seen[price] = true; levels.push(price); }
-          });
-          levels.sort(function(a, b) { return b - a; });
-          if (levels.length > 0) results.push({ study: s.name, levels: levels });
-        } catch(e) {}
-      }
-      return { symbol: chart.symbol(), study_count: results.length, studies: results };
-    })()
-  `);
+// Reuses data.js's buildGraphicsJS + shapeLines (the `_primitivesDataById` path
+// with y1/y2 horizontal-level extraction) so streamed lines match
+// data_get_pine_lines. The old `line.points[0].price` shape is no longer read.
+export async function fetchLines(evaluate, studyFilter) {
+  const r = await evaluate(`({ symbol: ${CHART_API}.symbol(), data: ${buildGraphicsJS('dwglines', 'lines', studyFilter || '')} })`);
+  const shaped = shapeLines(r?.data?.results || [], r?.data?.warnings || []);
+  return {
+    symbol: r?.symbol,
+    study_count: shaped.study_count,
+    studies: shaped.studies.map(s => ({ study: s.name, levels: s.horizontal_levels })),
+  };
 }
 
 export async function streamLines({ interval, filter, sink, _deps } = {}) {
@@ -297,41 +279,17 @@ export async function streamLines({ interval, filter, sink, _deps } = {}) {
 
 // ── Stream: pine labels ──
 
-async function fetchLabels(evaluate, studyFilter) {
-  const filterStr = studyFilter ? JSON.stringify(studyFilter) : 'null';
-  return evaluate(`
-    (function() {
-      var filter = ${filterStr};
-      var chart = ${CHART_API};
-      var studies = chart.getAllStudies();
-      var results = [];
-      for (var i = 0; i < studies.length; i++) {
-        var s = studies[i];
-        if (filter && (s.name || '').toLowerCase().indexOf(filter.toLowerCase()) === -1) continue;
-        try {
-          var study = chart.getStudyById(s.id);
-          if (!study) continue;
-          var src = study._study || study;
-          var g = src._graphics || (src._source && src._source._graphics);
-          if (!g) continue;
-          var pc = g._primitivesCollection;
-          if (!pc || !pc.dwglabels) continue;
-          var labelsMap = pc.dwglabels.get('labels');
-          if (!labelsMap) continue;
-          var data = labelsMap.get(false);
-          if (!data || !data._primitivesDataById) continue;
-          var labels = [];
-          data._primitivesDataById.forEach(function(lbl) {
-            var text = lbl.text || '';
-            var price = lbl.points && lbl.points[0] ? lbl.points[0].price : null;
-            if (text) labels.push({ text: text, price: price });
-          });
-          if (labels.length > 0) results.push({ study: s.name, labels: labels.slice(0, 50) });
-        } catch(e) {}
-      }
-      return { symbol: chart.symbol(), study_count: results.length, studies: results };
-    })()
-  `);
+// Reuses data.js's buildGraphicsJS + shapeLabels (the `_primitivesDataById` path
+// with t/y text+price extraction, capped at 50) so streamed labels match
+// data_get_pine_labels. The old `lbl.text`/`lbl.points[0].price` shape is gone.
+export async function fetchLabels(evaluate, studyFilter) {
+  const r = await evaluate(`({ symbol: ${CHART_API}.symbol(), data: ${buildGraphicsJS('dwglabels', 'labels', studyFilter || '')} })`);
+  const shaped = shapeLabels(r?.data?.results || [], r?.data?.warnings || []);
+  return {
+    symbol: r?.symbol,
+    study_count: shaped.study_count,
+    studies: shaped.studies.map(s => ({ study: s.name, labels: s.labels })),
+  };
 }
 
 export async function streamLabels({ interval, filter, sink, _deps } = {}) {
@@ -341,48 +299,38 @@ export async function streamLabels({ interval, filter, sink, _deps } = {}) {
 
 // ── Stream: pine tables ──
 
-async function fetchTables(evaluate, studyFilter) {
-  const filterStr = studyFilter ? JSON.stringify(studyFilter) : 'null';
-  return evaluate(`
-    (function() {
-      var filter = ${filterStr};
-      var chart = ${CHART_API};
-      var studies = chart.getAllStudies();
-      var results = [];
-      for (var i = 0; i < studies.length; i++) {
-        var s = studies[i];
-        if (filter && (s.name || '').toLowerCase().indexOf(filter.toLowerCase()) === -1) continue;
-        try {
-          var study = chart.getStudyById(s.id);
-          if (!study) continue;
-          var src = study._study || study;
-          var g = src._graphics || (src._source && src._source._graphics);
-          if (!g) continue;
-          var pc = g._primitivesCollection;
-          if (!pc || !pc.ownFirstValue) continue;
-          var tableMap = pc.ownFirstValue();
-          if (!tableMap) continue;
-          var tables = [];
-          if (typeof tableMap.forEach === 'function') {
-            tableMap.forEach(function(table) {
-              if (!table || !table.data) return;
-              var rows = [];
-              for (var r = 0; r < table.data.length; r++) {
-                var row = [];
-                for (var c = 0; c < table.data[r].length; c++) {
-                  row.push(table.data[r][c].text || '');
-                }
-                rows.push(row);
-              }
-              tables.push({ rows: rows });
-            });
-          }
-          if (tables.length > 0) results.push({ study: s.name, tables: tables });
-        } catch(e) {}
-      }
-      return { symbol: chart.symbol(), study_count: results.length, studies: results };
-    })()
-  `);
+// Reshapes the raw dwgtablecells items (the SAME `_primitivesDataById` path
+// data.js reads, with tid/row/col/t fields) into the stream's array-of-cells row
+// schema. Pure JS, so it is unit-tested offline. data.js's shapeTables joins each
+// row into a string; the stream keeps per-cell arrays, so we reshape here rather
+// than reuse that shaper — but read the identical fields.
+export function shapeStreamTables(results) {
+  return (results || []).map(s => {
+    const grids = {};
+    for (const item of s.items) {
+      const v = item.raw || {};
+      const tid = v.tid || 0;
+      (grids[tid] = grids[tid] || {});
+      (grids[tid][v.row] = grids[tid][v.row] || {})[v.col] = v.t || '';
+    }
+    const tables = Object.keys(grids).map(tid => {
+      const rowsObj = grids[tid];
+      const rowNums = Object.keys(rowsObj).map(Number).sort((a, b) => a - b);
+      const rows = rowNums.map(rn => {
+        const cols = rowsObj[rn];
+        const colNums = Object.keys(cols).map(Number).sort((a, b) => a - b);
+        return colNums.map(cn => cols[cn]);
+      });
+      return { rows };
+    });
+    return { study: s.name, tables };
+  });
+}
+
+export async function fetchTables(evaluate, studyFilter) {
+  const r = await evaluate(`({ symbol: ${CHART_API}.symbol(), data: ${buildGraphicsJS('dwgtablecells', 'tableCells', studyFilter || '')} })`);
+  const studies = shapeStreamTables(r?.data?.results || []);
+  return { symbol: r?.symbol, study_count: studies.length, studies };
 }
 
 export async function streamTables({ interval, filter, sink, _deps } = {}) {

@@ -10,7 +10,7 @@ const CHART_API = KNOWN_PATHS.chartApi;
  * leading "1" prefix ("1D" === "D", "1W" === "W"). We uppercase, trim, and strip a
  * redundant leading "1" before a letter so "1D" and "D" compare equal.
  */
-function normalizeResolution(res) {
+export function normalizeResolution(res) {
   if (res === null || res === undefined) return null;
   let s = String(res).trim().toUpperCase();
   if (!s) return null;
@@ -36,14 +36,18 @@ export async function pollUntil(predicate, { interval = 200, timeout = 10000 } =
   }
 }
 
-export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT) {
+export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT, { _deps } = {}) {
+  // _deps lets offline tests inject evaluate (controlled chart state) and sleep
+  // (instant), so the readiness gate/stability/timeout paths are unit-testable.
+  const ev = _deps?.evaluate || evaluate;
+  const sleep = _deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
   const start = Date.now();
   let lastBarCount = -1;
   let stableCount = 0;
   const wantTf = normalizeResolution(expectedTf);
 
   while (Date.now() - start < timeout) {
-    const state = await evaluate(`
+    const state = await ev(`
       (function() {
         // Check for loading spinner
         var spinner = document.querySelector('[class*="loader"]')
@@ -90,21 +94,21 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     `);
 
     if (!state) {
-      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      await sleep(POLL_INTERVAL);
       continue;
     }
 
     // Not ready if still loading
     if (state.isLoading) {
       stableCount = 0;
-      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      await sleep(POLL_INTERVAL);
       continue;
     }
 
     // Check symbol match if expected
     if (expectedSymbol && state.currentSymbol && !state.currentSymbol.toUpperCase().includes(expectedSymbol.toUpperCase())) {
       stableCount = 0;
-      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      await sleep(POLL_INTERVAL);
       continue;
     }
 
@@ -115,7 +119,7 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
       const actualTf = normalizeResolution(state.resolution);
       if (actualTf && actualTf !== wantTf) {
         stableCount = 0;
-        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+        await sleep(POLL_INTERVAL);
         continue;
       }
     }
