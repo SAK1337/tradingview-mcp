@@ -9,7 +9,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { studyMatchesFilter, roundValue, shapeLines } from '../src/core/data.js';
+import { studyMatchesFilter, roundValue, shapeLines, getAllGraphicsShaped } from '../src/core/data.js';
+import { batchRun } from '../src/core/batch.js';
 import {
   shallowFingerprint,
   fingerprintFor,
@@ -175,5 +176,50 @@ describe('per-stream fingerprints (dedup behaviour)', () => {
       { name: 'BB', values: { Upper: 100, Basis: 95, Lower: 90 } },
     ] };
     assert.ok(fpStudies(data).length <= JSON.stringify(data).length);
+  });
+});
+
+describe('getAllGraphicsShaped — one round-trip for all four pine types', () => {
+  it('issues exactly ONE evaluate and returns all four shaped slices', async () => {
+    let evalCount = 0;
+    const _deps = {
+      evaluate: async () => {
+        evalCount++;
+        return { lines: [], labels: [], tables: [], boxes: [], warnings: [] };
+      },
+    };
+    const r = await getAllGraphicsShaped({ _deps });
+    assert.equal(evalCount, 1, 'exactly one CDP round-trip for all four types');
+    assert.ok(r.lines && r.labels && r.tables && r.boxes, 'all four slices present');
+    assert.equal(r.lines.success, true);
+    assert.equal(r.boxes.success, true);
+  });
+});
+
+describe('batch get_ohlcv — bounded tail-read, not full exportData', () => {
+  it('reads the last N bars via valueAt and never calls exportData', async () => {
+    const calls = { evaluate: [], evaluateAsync: [] };
+    const _deps = {
+      // Force the apiPath branch (no collection), ready immediately.
+      getChartCollection: async () => { throw new Error('no collection'); },
+      getChartApi: async () => 'APIPATH',
+      waitForChartReady: async () => true,
+      evaluate: async (js) => {
+        calls.evaluate.push(js);
+        if (/valueAt/.test(js)) {
+          return { bar_count: 3, last_bar: { time: 3, open: 1, high: 2, low: 0, close: 1.5, volume: 9 } };
+        }
+        return undefined;
+      },
+      evaluateAsync: async (js) => { calls.evaluateAsync.push(js); return {}; },
+    };
+    const r = await batchRun({ symbols: ['AAPL'], timeframes: [], action: 'get_ohlcv', ohlcv_count: 3, delay_ms: 1, _deps });
+    assert.equal(r.success, true);
+    const ohlcvCall = calls.evaluate.find(js => /valueAt/.test(js));
+    assert.ok(ohlcvCall, 'used a bounded valueAt tail-read');
+    assert.ok(!/exportData/.test(ohlcvCall), 'did not export the full chart history');
+    assert.equal(calls.evaluateAsync.length, 0, 'the exportData evaluateAsync path is gone');
+    assert.equal(r.results[0].result.bar_count, 3);
+    assert.equal(r.results[0].result.last_bar.close, 1.5);
   });
 });

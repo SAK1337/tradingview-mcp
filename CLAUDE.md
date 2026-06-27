@@ -51,6 +51,7 @@ Custom Pine indicators draw with `line.new()`, `label.new()`, `table.new()`, `bo
 2. `data_get_pine_labels` → text annotations with prices (e.g., "PDH 24550", "Bias Long ✓")
 3. `data_get_pine_tables` → table data formatted as rows (e.g., session stats, analytics dashboards)
 4. `data_get_pine_boxes` → price zones / ranges as {high, low} pairs
+5. `data_get_pine_graphics` → all four of the above in ONE CDP round-trip (one `model.dataSources()` scan). **Preferred for the full "Analyze my chart" / report pass**; use the per-type tools only for targeted reads.
 
 Use `study_filter` parameter to target a specific indicator by name substring (e.g., `study_filter: "Profiler"`).
 
