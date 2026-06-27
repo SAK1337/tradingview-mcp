@@ -16,52 +16,106 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, deleteAlerts, list } from '../src/core/alerts.js';
 
-// A scripted evaluate: classifies each call by the page expression and returns
-// the matching canned value. Lets us simulate "Create button missing" by
-// returning false for the final create-click expression.
-function scriptedDeps({ opened = true, priceSet = true, created = true } = {}) {
+// A scripted evaluate that classifies each page-side expression the rewritten
+// create() issues and returns a canned result, plus a fake CDP client that
+// records mouse/key input. This lets us exercise the open -> apply-condition ->
+// verify -> price -> Create flow entirely offline, and simulate each failure
+// (dialog won't open, condition control missing, option not offered, read-back
+// mismatch, Create button missing) by flipping one flag.
+function scriptedDeps({
+  paneFound = true,
+  dialogOpens = true,
+  rowFound = true,
+  optionFound = true,
+  readback = 'Crossing',
+  priceSet = true,
+  createFound = true,
+} = {}) {
   const calls = [];
+  const mouse = [];
+  const keys = [];
   const evaluate = async (expr) => {
     calls.push(expr);
-    // Open-dialog probe: looks for the "Create Alert" / alerts button.
-    if (/Create Alert|data-name="alerts"/.test(expr) && /\.click\(\); return true/.test(expr)) return opened;
-    // Price field population.
+    if (/chart-gui-wrapper|chart-markup-table|canvas/.test(expr)) return paneFound ? { x: 50, y: 50 } : null;
+    if (/Add alert on/.test(expr)) return { x: 60, y: 60 };
+    if (/!!document\.querySelector/.test(expr)) return dialogOpens;                       // dialog-present probe
+    if (/operatorRow/.test(expr) && /getBoundingClientRect/.test(expr)) return rowFound ? { x: 70, y: 70 } : null;
+    if (/\[role="option"\]/.test(expr)) return optionFound ? { x: 80, y: 80 } : null;     // option lookup by label
+    if (/operatorRow/.test(expr) && /textContent/.test(expr)) return readback;            // condition read-back
     if (/HTMLInputElement\.prototype/.test(expr)) return priceSet;
-    // Final "Create" submit button.
-    if (/\^create\$/i.test(expr) || /\/\^create\$\/i/.test(expr)) return created;
+    if (/HTMLTextAreaElement/.test(expr)) return undefined;
+    if (/\^create\$/.test(expr)) return createFound ? { x: 90, y: 90 } : null;            // Create button rect
     return undefined;
   };
-  // getClient is only reached if `opened` is falsy (keyboard fallback path).
   const fakeClient = {
-    Input: { dispatchKeyEvent: async () => {} },
+    Input: {
+      dispatchMouseEvent: async (e) => { if (e.type === 'mousePressed') mouse.push(e); },
+      dispatchKeyEvent: async (e) => { keys.push(e); },
+    },
   };
-  return { _deps: { evaluate, getClient: async () => fakeClient }, calls };
+  return { _deps: { evaluate, getClient: async () => fakeClient }, calls, mouse, keys };
 }
 
-describe('alerts.create — failure contract', () => {
-  it('throws when the Create button is not found (created falsy)', async () => {
-    const { _deps } = scriptedDeps({ opened: true, priceSet: true, created: false });
+describe('alerts.create — applies and verifies the condition', () => {
+  it('selects the requested condition and reports the read-back, not a blind echo', async () => {
+    const { _deps, calls } = scriptedDeps({ readback: 'Crossing' });
+    const r = await create({ condition: 'crossing', price: 100, message: 'hi', _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.price, 100);
+    assert.equal(r.condition_requested, 'crossing');   // what was asked
+    assert.equal(r.condition, 'Crossing');             // what the dialog confirmed
+    assert.equal(r.source, 'applied');
+    assert.equal(r.price_set, true);
+    // proves a condition-selection step actually ran (option lookup by label)
+    assert.ok(calls.some(c => /\[role="option"\]/.test(c)), 'issued the condition-select evaluate');
+  });
+
+  it('maps each enum value to the matching dialog label on read-back', async () => {
+    const { _deps } = scriptedDeps({ readback: 'Crossing Down' });
+    const r = await create({ condition: 'crossing_down', price: 5, _deps });
+    assert.equal(r.condition_requested, 'crossing_down');
+    assert.equal(r.condition, 'Crossing Down');
+  });
+
+  it('throws when the condition control is not in the dialog', async () => {
+    const { _deps } = scriptedDeps({ rowFound: false });
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 1, _deps }),
+      /condition control not found/,
+    );
+  });
+
+  it('throws when the requested option is not offered by this build', async () => {
+    const { _deps } = scriptedDeps({ optionFound: false });
+    await assert.rejects(
+      () => create({ condition: 'crossing_up', price: 1, _deps }),
+      /not offered by this TradingView build/,
+    );
+  });
+
+  it('throws when the read-back does not match the requested condition', async () => {
+    // requested crossing (label "Crossing") but the dialog reports "Crossing Up"
+    const { _deps } = scriptedDeps({ readback: 'Crossing Up' });
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 1, _deps }),
+      /Alert condition not applied/,
+    );
+  });
+
+  it('throws when the Create button is not found (after the condition is applied)', async () => {
+    const { _deps } = scriptedDeps({ createFound: false });
     await assert.rejects(
       () => create({ condition: 'crossing', price: 100, _deps }),
       /Could not find Create button/,
     );
   });
 
-  it('succeeds when all page steps resolve truthy', async () => {
-    const { _deps } = scriptedDeps({ opened: true, priceSet: true, created: true });
-    const r = await create({ condition: 'greater_than', price: 250.5, message: 'hi', _deps });
-    assert.equal(r.success, true);
-    assert.equal(r.price, 250.5);
-    assert.equal(r.condition, 'greater_than');
-    assert.equal(r.price_set, true);
-  });
-
-  it('still uses the keyboard fallback (getClient) when open probe is falsy', async () => {
-    // opened=false drives the getClient keyboard path; created=true so it
-    // ultimately succeeds — asserting the fallback branch doesn't crash.
-    const { _deps } = scriptedDeps({ opened: false, priceSet: true, created: true });
-    const r = await create({ condition: 'crossing', price: 1, _deps });
-    assert.equal(r.success, true);
+  it('throws when the dialog never opens', async () => {
+    const { _deps } = scriptedDeps({ dialogOpens: false });
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 1, _deps }),
+      /Could not open the alert dialog/,
+    );
   });
 });
 

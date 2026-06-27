@@ -13,7 +13,7 @@ register('alert', {
       description: 'Create a price alert',
       options: {
         price: { type: 'string', short: 'p', description: 'Price level' },
-        condition: { type: 'string', short: 'c', description: 'Condition: crossing, greater_than, less_than' },
+        condition: { type: 'string', short: 'c', description: 'Condition: crossing, crossing_up, crossing_down' },
         message: { type: 'string', short: 'm', description: 'Alert message' },
       },
       handler: (opts) => {
