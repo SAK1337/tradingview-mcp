@@ -203,22 +203,40 @@ export async function list({ _deps } = {}) {
   return { success: true, alert_count: result?.alerts?.length || 0, source: 'internal_api', alerts: result?.alerts || [] };
 }
 
-export async function deleteAlerts({ delete_all = false, _deps } = {}) {
-  const { evaluate } = _resolve(_deps);
+// Page-side fetch to the pricealerts delete endpoint. The body MUST be wrapped in
+// `payload` and sent as text/plain — application/json triggers a CORS preflight
+// the server rejects, and the bare `{alert_ids:[...]}` shape returns
+// invalid_request. Captured from the live TradingView client via CDP Network.
+function deleteAlertsJS(ids) {
+  const body = JSON.stringify({ payload: { alert_ids: ids } });
+  return `
+    fetch('https://pricealerts.tradingview.com/delete_alerts', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: ${JSON.stringify(body)}
+    })
+      .then(function(r) { return r.json(); })
+      .catch(function(e) { return { error: e.message }; })
+  `;
+}
+
+export async function deleteAlerts({ alert_ids, delete_all = false, _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
+
+  let ids = Array.isArray(alert_ids) ? alert_ids.slice() : (alert_ids != null ? [alert_ids] : []);
+
   if (delete_all) {
-    const result = await evaluate(`
-      (function() {
-        var alertBtn = document.querySelector('[data-name="alerts"]');
-        if (alertBtn) alertBtn.click();
-        var header = document.querySelector('[data-name="alerts"]');
-        if (header) {
-          header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
-          return { context_menu_opened: true };
-        }
-        return { context_menu_opened: false };
-      })()
-    `);
-    return { success: true, note: 'Alert deletion requires manual confirmation in the context menu.', context_menu_opened: result?.context_menu_opened || false, source: 'dom_fallback' };
+    const listed = await list({ _deps });
+    ids = (listed.alerts || []).map(a => a.alert_id);
+    if (ids.length === 0) return { success: true, deleted_count: 0, deleted_ids: [], source: 'pricealerts_api' };
   }
-  throw new Error('Individual alert deletion not supported; pass delete_all:true');
+
+  if (ids.length === 0) throw new Error('Pass alert_ids (one id or an array) or delete_all:true');
+
+  const result = await evaluateAsync(deleteAlertsJS(ids));
+  if (result?.error) throw new Error(result.error);
+  if (result?.s !== 'ok') throw new Error(`delete_alerts failed: ${result?.errmsg || JSON.stringify(result)}`);
+
+  return { success: true, deleted_count: ids.length, deleted_ids: ids, source: 'pricealerts_api' };
 }
