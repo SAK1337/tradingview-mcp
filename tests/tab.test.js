@@ -90,6 +90,27 @@ describe('switchTab — index validation', () => {
       /out of range \(have 1 tabs\)/i,
     );
   });
+
+  it('rejects a negative index with the clear out-of-range error (not a TypeError)', async () => {
+    stubTargets(3); // valid indices: 0, 1, 2
+    await assert.rejects(
+      () => switchTab({ index: -1 }),
+      (err) => /Tab index -1 out of range \(have 3 tabs\)/.test(err.message)
+        && !/Cannot read properties of undefined/.test(err.message),
+    );
+  });
+
+  it('rejects a NaN / fractional index clearly instead of indexing undefined', async () => {
+    stubTargets(3);
+    await assert.rejects(
+      () => switchTab({ index: NaN }),
+      (err) => /out of range/.test(err.message) && !/Cannot read properties of undefined/.test(err.message),
+    );
+    await assert.rejects(
+      () => switchTab({ index: 1.5 }),
+      (err) => /out of range/.test(err.message) && !/Cannot read properties of undefined/.test(err.message),
+    );
+  });
 });
 
 // ── switchTab reconnect (DEFERRED from #1, now unblocked by tab.js _deps) ──
