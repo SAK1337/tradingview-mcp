@@ -9,8 +9,11 @@
 ## 3. Shared helpers
 - [x] 3.1 Add `pollUntil(predicate, {interval, timeout})` to `wait.js`; refactor the pine-editor poll to use
       it. (waitForChartReady's readiness loop left intact per scope — that is change #4.)
-- [ ] 3.2 Extract `findCompileButton()` (pine), `findStrategy()` (data), `findBarIndexRange()` (chart).
-      (Deferred — out of the maintainability sweep scope assigned for this change; see report.)
+- [x] 3.2 Extract `findCompileButton()` (pine), `findStrategy()` (data), `findBarIndexRange()` (chart).
+      All three are exported snippet builders reused by their call sites (`compile`/`smartCompile`;
+      `getStrategyResults`/`getTrades`/`getEquity`; `setVisibleRange`/`scrollToDate`), with snippet unit
+      tests in `tests/router.test.js`. Behavior preserved (compile prefix-match vs smartCompile exact-match
+      kept via the `exact` flag).
 - [x] 3.3 Add `wrap(fn)` to `_format.js`; adopt it in a few tool registrars (indicators.js, tab.js).
 
 ## 4. Single source of truth + config
