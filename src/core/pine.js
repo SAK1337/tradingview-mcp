@@ -3,7 +3,7 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, KNOWN_PATHS } from '../connection.js';
 import { pollUntil as _pollUntil } from '../wait.js';
 
 function _resolve(deps) {
@@ -18,7 +18,8 @@ function _resolve(deps) {
 // Base URL for the Pine REST facade (compile/translate/list/get/save). Overridable
 // via PINE_FACADE_URL so air-gapped / proxied setups can point at a mirror; defaults
 // to the public TradingView endpoint. Trailing slash is trimmed for safe concat.
-const PINE_FACADE_BASE = (process.env.PINE_FACADE_URL || 'https://pine-facade.tradingview.com/pine-facade').replace(/\/+$/, '');
+const PINE_FACADE_BASE = KNOWN_PATHS.pineFacadeApi;
+const CHART_API = KNOWN_PATHS.chartApi;
 
 // How long to wait after clicking compile/add-to-chart before reading markers —
 // gives TV's server-side compile round-trip time to populate Monaco error markers.
@@ -512,7 +513,7 @@ export async function smartCompile({ _deps } = {}) {
   const studiesBefore = await evaluate(`
     (function() {
       try {
-        var chart = window.TradingViewApi._activeChartWidgetWV.value();
+        var chart = ${CHART_API};
         if (chart && typeof chart.getAllStudies === 'function') return chart.getAllStudies().length;
       } catch(e) {}
       return null;
@@ -545,7 +546,7 @@ export async function smartCompile({ _deps } = {}) {
   const studiesAfter = await evaluate(`
     (function() {
       try {
-        var chart = window.TradingViewApi._activeChartWidgetWV.value();
+        var chart = ${CHART_API};
         if (chart && typeof chart.getAllStudies === 'function') return chart.getAllStudies().length;
       } catch(e) {}
       return null;

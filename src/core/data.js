@@ -92,7 +92,7 @@ function graphicsExtractSnippet() {
 function buildGraphicsJS(collectionName, mapKey, filter) {
   return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var chart = ${CHART_API}._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
       var results = [];
@@ -126,7 +126,7 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
 function buildAllGraphicsJS(filter) {
   return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var chart = ${CHART_API}._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
       var KINDS = ${JSON.stringify(GRAPHICS_KINDS)};
@@ -501,7 +501,7 @@ export async function getStudyValues({ study_filter, _deps } = {}) {
   // lengths — same display name, different series).
   const data = await evaluate(`
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      var chart = ${CHART_API};
       var studies = chart.getAllStudies();
       var results = [];
       var filter = ${safeString(study_filter || '')};

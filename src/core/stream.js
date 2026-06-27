@@ -392,7 +392,7 @@ export async function streamTables({ interval, filter, sink, _deps } = {}) {
 
 // ── Stream: all panes (multi-symbol) ──
 
-const CWC = 'window.TradingViewApi._chartWidgetCollection';
+const CWC = KNOWN_PATHS.chartWidgetCollection;
 
 async function fetchAllPanes(evaluate) {
   return evaluate(`
