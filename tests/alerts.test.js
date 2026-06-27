@@ -6,14 +6,15 @@
  *   - create() THROWS when the dialog's Create button can't be found
  *     (the final evaluate resolves falsy) — the normalized failure contract.
  *   - create() succeeds when every page-side step resolves truthy.
- *   - deleteAlerts() returns { success: false } (does NOT throw) when
- *     delete_all is omitted.
+ *   - deleteAlerts() THROWS when delete_all is omitted (normalize-remaining-
+ *     failure-signaling — so the tool wrapper sets the MCP isError flag).
+ *   - list() THROWS on a page-side error instead of returning success-with-error.
  *
  * Run: node --test tests/alerts.test.js
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, deleteAlerts } from '../src/core/alerts.js';
+import { create, deleteAlerts, list } from '../src/core/alerts.js';
 
 // A scripted evaluate: classifies each call by the page expression and returns
 // the matching canned value. Lets us simulate "Create button missing" by
@@ -64,12 +65,13 @@ describe('alerts.create — failure contract', () => {
   });
 });
 
-describe('alerts.deleteAlerts — no-throw failure for missing delete_all', () => {
-  it('returns { success: false } without throwing when delete_all omitted', async () => {
-    // No evaluate should be needed on this path, but provide one to be safe.
-    const r = await deleteAlerts({ _deps: { evaluate: async () => ({}) } });
-    assert.equal(r.success, false);
-    assert.match(r.error, /pass delete_all:true/);
+describe('alerts.deleteAlerts — throws for missing delete_all', () => {
+  it('throws (so the tool sets isError) when delete_all omitted', async () => {
+    // No evaluate should be reached on this path, but provide one to be safe.
+    await assert.rejects(
+      () => deleteAlerts({ _deps: { evaluate: async () => ({}) } }),
+      /Individual alert deletion not supported; pass delete_all:true/,
+    );
   });
 
   it('returns success:true and reports the context-menu state when delete_all set', async () => {
@@ -77,5 +79,20 @@ describe('alerts.deleteAlerts — no-throw failure for missing delete_all', () =
     const r = await deleteAlerts({ delete_all: true, _deps });
     assert.equal(r.success, true);
     assert.equal(r.context_menu_opened, true);
+  });
+});
+
+describe('alerts.list — throws instead of success-with-error', () => {
+  it('throws when the page payload carries an error', async () => {
+    const _deps = { evaluateAsync: async () => ({ alerts: [], error: 'list_alerts failed: 503' }) };
+    await assert.rejects(() => list({ _deps }), /list_alerts failed: 503/);
+  });
+
+  it('returns the success shape with no error field on the happy path', async () => {
+    const _deps = { evaluateAsync: async () => ({ alerts: [{ alert_id: 1 }, { alert_id: 2 }] }) };
+    const r = await list({ _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.alert_count, 2);
+    assert.ok(!('error' in r), 'no embedded error field on success');
   });
 });

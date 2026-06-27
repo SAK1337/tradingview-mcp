@@ -89,10 +89,10 @@ function graphicsExtractSnippet() {
           }`;
 }
 
-function buildGraphicsJS(collectionName, mapKey, filter) {
+export function buildGraphicsJS(collectionName, mapKey, filter) {
   return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var chart = ${CHART_API}._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
       var results = [];
@@ -126,7 +126,7 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
 function buildAllGraphicsJS(filter) {
   return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var chart = ${CHART_API}._chartWidget;
       var model = chart.model();
       var sources = model.model().dataSources();
       var KINDS = ${JSON.stringify(GRAPHICS_KINDS)};
@@ -488,23 +488,24 @@ export async function getDepth({ _deps } = {}) {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues({ study_filter, _deps } = {}) {
-  const { evaluate } = _resolve(_deps);
-  // Reads the LAST BAR value of every plot in every study, directly from
-  // each study's computed series. We deliberately don't use dataWindowView()
-  // here — that path mirrors the on-screen "Data Window" sidebar, which only
-  // populates when the user's crosshair is over a bar, so values were
-  // empty (or stale at whatever bar the cursor last hovered) for headless
-  // callers. Reading from `_study.data()._items` gives a deterministic
-  // current value; `entity_id` is included so callers can disambiguate
-  // studies that share a name (e.g. two "Moving Average" with different
-  // lengths — same display name, different series).
-  const data = await evaluate(`
+/**
+ * Builds the page-side study-values extraction snippet. Reads the LAST BAR value
+ * of every plot in every study, directly from each study's computed series. We
+ * deliberately don't use dataWindowView() here — that path mirrors the on-screen
+ * "Data Window" sidebar, which only populates when the user's crosshair is over a
+ * bar, so values were empty (or stale at whatever bar the cursor last hovered) for
+ * headless callers. Reading from `_study.data()._items` gives a deterministic
+ * current value; `entity_id` is included so callers can disambiguate studies that
+ * share a name (e.g. two "Moving Average" with different lengths). Exported so the
+ * streaming module reuses the EXACT same extraction (no drift from this surface).
+ */
+export function buildStudyValuesJS(filter) {
+  return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      var chart = ${CHART_API};
       var studies = chart.getAllStudies();
       var results = [];
-      var filter = ${safeString(study_filter || '')};
+      var filter = ${safeString(filter || '')};
       for (var i = 0; i < studies.length; i++) {
         var meta = studies[i];
         // EARLY FILTER: skip non-matching studies before reading series data.
@@ -553,7 +554,12 @@ export async function getStudyValues({ study_filter, _deps } = {}) {
       }
       return results;
     })()
-  `);
+  `;
+}
+
+export async function getStudyValues({ study_filter, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  const data = await evaluate(buildStudyValuesJS(study_filter));
   return { success: true, study_count: data?.length || 0, studies: data || [] };
 }
 

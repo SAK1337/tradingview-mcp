@@ -123,7 +123,10 @@ export async function switchTab({ index, _deps }) {
   const tabs = await list({ _deps });
   const idx = Number(index);
 
-  if (idx >= tabs.tab_count) {
+  // Guard both bounds and non-integers BEFORE indexing tabs.tabs[idx]; a
+  // negative/NaN/fractional index otherwise reads `undefined` and throws an
+  // opaque `Cannot read properties of undefined (reading 'id')` deeper down.
+  if (!Number.isInteger(idx) || idx < 0 || idx >= tabs.tab_count) {
     throw new Error(`Tab index ${idx} out of range (have ${tabs.tab_count} tabs)`);
   }
 

@@ -97,14 +97,22 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
           actionResult = { file_path: filePath, size_bytes: buffer.length };
         } else if (action === 'get_ohlcv' && apiPath) {
           const limit = Math.min(ohlcv_count || 100, 500);
-          actionResult = await evaluateAsync(`
-            new Promise(function(resolve, reject) {
-              ${apiPath}.exportData({ includeTime: true, includeSeries: true, includeStudies: false })
-                .then(function(result) {
-                  var bars = (result.data || []).slice(-${limit});
-                  resolve({ bar_count: bars.length, last_bar: bars[bars.length - 1] || null });
-                }).catch(reject);
-            })
+          // Tail-read the last N bars straight from the series (mirrors getOhlcv)
+          // rather than exportData({includeSeries:true}), which materializes and
+          // serializes the ENTIRE chart history in-page on every iteration.
+          actionResult = await evaluate(`
+            (function() {
+              var bars = ${apiPath}._chartWidget.model().mainSeries().bars();
+              if (!bars || typeof bars.lastIndex !== 'function') return { bar_count: 0, last_bar: null };
+              var end = bars.lastIndex();
+              var start = Math.max(bars.firstIndex(), end - ${limit} + 1);
+              var count = 0, last = null;
+              for (var i = start; i <= end; i++) {
+                var v = bars.valueAt(i);
+                if (v) { count++; last = { time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0 }; }
+              }
+              return { bar_count: count, last_bar: last };
+            })()
           `);
         } else if (action === 'get_strategy_results') {
           await new Promise(r => setTimeout(r, STRATEGY_REPORT_SETTLE_MS));

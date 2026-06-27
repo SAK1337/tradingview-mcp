@@ -116,7 +116,8 @@ export async function list({ _deps } = {}) {
       })
       .catch(function(e) { return { alerts: [], error: e.message }; })
   `);
-  return { success: true, alert_count: result?.alerts?.length || 0, source: 'internal_api', alerts: result?.alerts || [], error: result?.error };
+  if (result?.error) throw new Error(result.error);
+  return { success: true, alert_count: result?.alerts?.length || 0, source: 'internal_api', alerts: result?.alerts || [] };
 }
 
 export async function deleteAlerts({ delete_all = false, _deps } = {}) {
@@ -136,5 +137,5 @@ export async function deleteAlerts({ delete_all = false, _deps } = {}) {
     `);
     return { success: true, note: 'Alert deletion requires manual confirmation in the context menu.', context_menu_opened: result?.context_menu_opened || false, source: 'dom_fallback' };
   }
-  return { success: false, error: 'Individual alert deletion not supported; pass delete_all:true' };
+  throw new Error('Individual alert deletion not supported; pass delete_all:true');
 }

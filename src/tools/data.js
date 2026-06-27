@@ -79,6 +79,15 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('data_get_pine_graphics', 'Read ALL Pine Script graphics — lines, labels, tables, boxes — in ONE CDP round-trip (one model.dataSources() scan). Preferred for the full-report / "analyze my chart" pass instead of four separate per-type calls. Use the per-type tools when you only need one kind.', {
+    study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
+    max_labels: z.coerce.number().int().positive().max(200).optional().describe('Max labels per study (default 50, max 200)'),
+    verbose: z.coerce.boolean().optional().describe('Return raw data with IDs, coordinates, colors (default false)'),
+  }, async ({ study_filter, max_labels, verbose }) => {
+    try { return jsonResult({ success: true, ...(await core.getAllGraphicsShaped({ study_filter, max_labels, verbose })) }); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('data_get_study_values', 'Get current indicator values for visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()). Values are returned as numbers (rounded to 2 decimals), not strings. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name (case-insensitive, e.g. "RSI", "Bollinger"). Omit for all visible studies.'),
   }, async ({ study_filter }) => {

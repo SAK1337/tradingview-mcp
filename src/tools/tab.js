@@ -10,6 +10,6 @@ export function registerTabTools(server) {
   server.tool('tab_close', 'Close the current chart tab', {}, wrap(core.closeTab));
 
   server.tool('tab_switch', 'Switch to a chart tab by index', {
-    index: z.coerce.number().describe('Tab index (0-based, from tab_list)'),
+    index: z.coerce.number().int().nonnegative().describe('Tab index (0-based, from tab_list)'),
   }, wrap(core.switchTab));
 }

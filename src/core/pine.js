@@ -3,7 +3,7 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, KNOWN_PATHS } from '../connection.js';
 import { pollUntil as _pollUntil } from '../wait.js';
 
 function _resolve(deps) {
@@ -18,7 +18,8 @@ function _resolve(deps) {
 // Base URL for the Pine REST facade (compile/translate/list/get/save). Overridable
 // via PINE_FACADE_URL so air-gapped / proxied setups can point at a mirror; defaults
 // to the public TradingView endpoint. Trailing slash is trimmed for safe concat.
-const PINE_FACADE_BASE = (process.env.PINE_FACADE_URL || 'https://pine-facade.tradingview.com/pine-facade').replace(/\/+$/, '');
+const PINE_FACADE_BASE = KNOWN_PATHS.pineFacadeApi;
+const CHART_API = KNOWN_PATHS.chartApi;
 
 // How long to wait after clicking compile/add-to-chart before reading markers —
 // gives TV's server-side compile round-trip time to populate Monaco error markers.
@@ -339,15 +340,20 @@ export async function setSource({ source, _deps }) {
   return { success: true, lines_set: source.split('\n').length };
 }
 
-export async function compile({ _deps } = {}) {
-  const { evaluate, getClient } = _resolve(_deps);
-  const editorReady = await ensurePineEditorOpen({ _deps });
-  if (!editorReady) throw new Error('Could not open Pine Editor.');
-
-  const clicked = await evaluate(`
+/**
+ * Builds the page-side snippet that locates the Pine editor's
+ * compile / add-to-chart / save button and clicks the highest-priority match,
+ * returning the action label (or null so the caller can fall back to Ctrl+Enter).
+ * `exact`: smartCompile matches "Add to chart"/"Update on chart" exactly and
+ * reports canonical labels; compile prefix-matches and echoes the button's text.
+ * Shared by compile() and smartCompile() so the button scan lives in one place.
+ */
+export function findCompileButton({ exact = false } = {}) {
+  return `
     (function() {
       var btns = document.querySelectorAll('button');
-      var fallback = null;
+      var addBtn = null;
+      var updateBtn = null;
       var saveBtn = null;
       for (var i = 0; i < btns.length; i++) {
         var text = btns[i].textContent.trim();
@@ -355,18 +361,29 @@ export async function compile({ _deps } = {}) {
           btns[i].click();
           return 'Save and add to chart';
         }
-        if (!fallback && /^(Add to chart|Update on chart)/i.test(text)) {
-          fallback = btns[i];
-        }
+        ${exact
+          ? `if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
+        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];`
+          : `if (!addBtn && /^(Add to chart|Update on chart)/i.test(text)) addBtn = btns[i];`}
         if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) {
           saveBtn = btns[i];
         }
       }
-      if (fallback) { fallback.click(); return fallback.textContent.trim(); }
+      ${exact
+        ? `if (addBtn) { addBtn.click(); return 'Add to chart'; }
+      if (updateBtn) { updateBtn.click(); return 'Update on chart'; }`
+        : `if (addBtn) { addBtn.click(); return addBtn.textContent.trim(); }`}
       if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
       return null;
-    })()
-  `);
+    })()`;
+}
+
+export async function compile({ _deps } = {}) {
+  const { evaluate, getClient } = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen({ _deps });
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
+
+  const clicked = await evaluate(findCompileButton());
 
   if (!clicked) {
     const c = await getClient();
@@ -496,35 +513,14 @@ export async function smartCompile({ _deps } = {}) {
   const studiesBefore = await evaluate(`
     (function() {
       try {
-        var chart = window.TradingViewApi._activeChartWidgetWV.value();
+        var chart = ${CHART_API};
         if (chart && typeof chart.getAllStudies === 'function') return chart.getAllStudies().length;
       } catch(e) {}
       return null;
     })()
   `);
 
-  const buttonClicked = await evaluate(`
-    (function() {
-      var btns = document.querySelectorAll('button');
-      var addBtn = null;
-      var updateBtn = null;
-      var saveBtn = null;
-      for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/save and add to chart/i.test(text)) {
-          btns[i].click();
-          return 'Save and add to chart';
-        }
-        if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
-        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
-        if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
-      }
-      if (addBtn) { addBtn.click(); return 'Add to chart'; }
-      if (updateBtn) { updateBtn.click(); return 'Update on chart'; }
-      if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
-      return null;
-    })()
-  `);
+  const buttonClicked = await evaluate(findCompileButton({ exact: true }));
 
   if (!buttonClicked) {
     const c = await getClient();
@@ -550,7 +546,7 @@ export async function smartCompile({ _deps } = {}) {
   const studiesAfter = await evaluate(`
     (function() {
       try {
-        var chart = window.TradingViewApi._activeChartWidgetWV.value();
+        var chart = ${CHART_API};
         if (chart && typeof chart.getAllStudies === 'function') return chart.getAllStudies().length;
       } catch(e) {}
       return null;
@@ -675,11 +671,11 @@ export async function listScripts({ _deps } = {}) {
       .catch(function(e) { return {scripts: [], error: e.message}; })
   `);
 
+  if (scripts?.error) throw new Error(scripts.error);
   return {
     success: true,
     scripts: scripts?.scripts || [],
     count: scripts?.scripts?.length || 0,
     source: 'internal_api',
-    error: scripts?.error,
   };
 }
