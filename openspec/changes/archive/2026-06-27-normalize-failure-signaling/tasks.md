@@ -26,10 +26,12 @@
       (Covered for the CLI exit-code path + findStrategy snippet in `tests/router.test.js`. Full per-core
       throw tests for data.js/alerts.js/ui.js are blocked on the missing `_deps`/evaluate seam — deferred
       to change #10 which adds DI to those modules.)
-- [ ] 5.2 Unit test: pine-graphics reader surfaces `_warnings` when a mocked `_primitivesCollection`
-      shape is undefined. (DEFERRED — data.js has no injectable `evaluate` seam yet; arrives with #10.)
+- [x] 5.2 Unit test: pine-graphics reader surfaces `_warnings` when a mocked `_primitivesCollection`
+      shape is undefined. (Done — the `_deps` evaluate seam arrived with #10; covered in
+      `tests/data.test.js` "getPineLines/getPineLabels — _warnings surfaced", which inject an evaluate
+      payload carrying warnings and assert the shaped result exposes `_warnings`.)
 - [x] 5.3 CLI test: a `success:false` handler result yields a non-zero exit code. (`tests/router.test.js`
       via exported pure `exitCodeFor()`.)
 
 ## 6. Validate
-- [ ] 6.1 `openspec validate normalize-failure-signaling --strict`
+- [x] 6.1 `openspec validate normalize-failure-signaling --strict`

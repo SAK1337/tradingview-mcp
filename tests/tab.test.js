@@ -1,19 +1,16 @@
 /**
  * Offline unit tests for tab management + the connection fetch helper.
  *
- * tab.js imports its connection seam (CDP_HOST/PORT, fetchWithTimeout,
- * disconnect, reconnect) DIRECTLY from connection.js — it has no `_deps`
- * injection seam yet. So these tests cover what is deterministic offline by
- * stubbing the global `fetch`:
+ * tab.js gained a `_resolve(_deps)` seam in the
+ * complete-dependency-injection-and-tests change, so these tests cover the
+ * tab behaviors deterministically offline:
  *   - fetchWithTimeout aborts a non-resolving fetch within its deadline.
- *   - switchTab throws on an out-of-range index (list() resolves from a stubbed
- *     /json/list, so the throw happens before any CDP reconnect is attempted).
- *
- * DEFERRED to the #10 complete-dependency-injection-and-tests change:
- *   - Asserting switchTab actually calls disconnect()/reconnect(target.id) on a
- *     valid index requires mocking the live CDP attach (chrome-remote-interface),
- *     which needs a DI seam on tab.js. The e2e variant (skipped without a live
- *     TradingView) is the other half of tasks.md 3.2.
+ *   - switchTab throws on an out-of-range index (before any CDP reconnect).
+ *   - switchTab activates the target then disconnects/reconnects the CDP
+ *     session to the NEW target id on a valid index, with injected fakes for
+ *     fetchWithTimeout/disconnect/reconnect — no live chrome-remote-interface
+ *     attach required. This offline DI assertion covers the reconnect intent of
+ *     fix-tab-switch-cdp-reconnect tasks.md 3.2, superseding a live-only e2e.
  *
  * Run: node --test tests/tab.test.js
  */

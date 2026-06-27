@@ -20,8 +20,10 @@
       abort are covered offline in `tests/tab.test.js`. NOTE: asserting the disconnect()/reconnect()
       rebuild on a VALID index needs to mock the live `chrome-remote-interface` attach, which requires a
       `_deps` seam on tab.js — deferred to the #10 complete-dependency-injection-and-tests change.
-- [ ] 3.2 Add an e2e test (skipped without a live TV) that switches tabs then asserts `chart_get_state`
-      returns the new tab's symbol. DEFERRED — paired with the DI seam in #10; offline coverage added instead.
+- [x] 3.2 Verify switchTab rebinds the CDP session to the new tab so subsequent calls hit it. (Done — the
+      tab.js `_deps` seam arrived with #10, so `tests/tab.test.js` "switchTab — reconnects CDP to the new
+      target (DI)" asserts offline that a valid index activates the target then disconnect()/reconnect(id)
+      to the NEW target id. This supersedes the originally-planned live-only e2e, which never runs in CI.)
 
 ## 4. Validate
 - [x] 4.1 `openspec validate fix-tab-switch-cdp-reconnect --strict`
