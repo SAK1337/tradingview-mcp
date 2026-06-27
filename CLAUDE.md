@@ -31,7 +31,10 @@ When committing/pushing/opening a PR:
 2. Push to the fork: `git push -u fork <branch>` (a bare `git push` may try `origin` and 403 — always name `fork`).
 3. Open the PR against upstream with an explicit cross-repo head:
    `gh pr create --repo tradesdontlie/tradingview-mcp --base main --head SAK1337:<branch> ...`
-4. Upstream merges PRs via **squash** (see history, e.g. PR #3).
+4. **Merging is NOT possible from this account** — `gh pr merge` returns
+   `SAK1337 does not have the correct permissions to execute MergePullRequest`. An upstream maintainer
+   (write access to `tradesdontlie`) merges the PR via the GitHub UI; the repo uses merge commits
+   (see history, e.g. "Merge pull request #3 from SAK1337/…").
 
 # TradingView MCP — Claude Instructions
 
