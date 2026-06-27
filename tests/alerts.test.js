@@ -6,8 +6,8 @@
  *   - create() THROWS when the dialog's Create button can't be found
  *     (the final evaluate resolves falsy) — the normalized failure contract.
  *   - create() succeeds when every page-side step resolves truthy.
- *   - deleteAlerts() THROWS when delete_all is omitted (normalize-remaining-
- *     failure-signaling — so the tool wrapper sets the MCP isError flag).
+ *   - deleteAlerts() deletes by id / array / delete_all via the pricealerts REST
+ *     API, and THROWS when no target is given or the API returns non-ok.
  *   - list() THROWS on a page-side error instead of returning success-with-error.
  *
  * Run: node --test tests/alerts.test.js
@@ -145,20 +145,71 @@ describe('alerts.create — applies and verifies the condition', () => {
   });
 });
 
-describe('alerts.deleteAlerts — throws for missing delete_all', () => {
-  it('throws (so the tool sets isError) when delete_all omitted', async () => {
-    // No evaluate should be reached on this path, but provide one to be safe.
+describe('alerts.deleteAlerts — REST deletion via pricealerts API', () => {
+  // Scripted evaluateAsync: classifies list_alerts vs delete_alerts by URL.
+  function delDeps({ listAlerts = [], deleteResult = { s: 'ok' } } = {}) {
+    const calls = [];
+    const evaluateAsync = async (expr) => {
+      calls.push(expr);
+      if (/list_alerts/.test(expr)) return { alerts: listAlerts };
+      if (/delete_alerts/.test(expr)) return deleteResult;
+      return undefined;
+    };
+    return { _deps: { evaluateAsync }, calls };
+  }
+
+  it('throws when no target (no alert_ids, no delete_all) is given', async () => {
+    const { _deps } = delDeps();
     await assert.rejects(
-      () => deleteAlerts({ _deps: { evaluate: async () => ({}) } }),
-      /Individual alert deletion not supported; pass delete_all:true/,
+      () => deleteAlerts({ _deps }),
+      /Pass alert_ids \(one id or an array\) or delete_all:true/,
     );
   });
 
-  it('returns success:true and reports the context-menu state when delete_all set', async () => {
-    const _deps = { evaluate: async () => ({ context_menu_opened: true }) };
+  it('deletes a single id and reports it, issuing the payload-wrapped POST', async () => {
+    const { _deps, calls } = delDeps({ deleteResult: { s: 'ok' } });
+    const r = await deleteAlerts({ alert_ids: 123, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.deleted_count, 1);
+    assert.deepEqual(r.deleted_ids, [123]);
+    assert.equal(r.source, 'pricealerts_api');
+    const del = calls.find(c => /delete_alerts/.test(c));
+    assert.ok(/payload/.test(del) && /alert_ids/.test(del) && /\[123\]/.test(del), 'sends {payload:{alert_ids:[123]}}');
+    assert.ok(/text\/plain/.test(del), 'uses text/plain content-type');
+  });
+
+  it('deletes an array of ids', async () => {
+    const { _deps } = delDeps();
+    const r = await deleteAlerts({ alert_ids: [1, 2, 3], _deps });
+    assert.equal(r.deleted_count, 3);
+    assert.deepEqual(r.deleted_ids, [1, 2, 3]);
+  });
+
+  it('delete_all lists then deletes every id', async () => {
+    const { _deps, calls } = delDeps({ listAlerts: [{ alert_id: 11 }, { alert_id: 22 }] });
+    const r = await deleteAlerts({ delete_all: true, _deps });
+    assert.equal(r.deleted_count, 2);
+    assert.deepEqual(r.deleted_ids, [11, 22]);
+    assert.ok(calls.some(c => /list_alerts/.test(c)), 'listed first');
+    assert.ok(calls.some(c => /delete_alerts/.test(c) && /\[11,22\]/.test(c.replace(/\s/g, ''))), 'bulk-deleted');
+  });
+
+  it('delete_all with no alerts succeeds with deleted_count 0 and skips the delete call', async () => {
+    const { _deps, calls } = delDeps({ listAlerts: [] });
     const r = await deleteAlerts({ delete_all: true, _deps });
     assert.equal(r.success, true);
-    assert.equal(r.context_menu_opened, true);
+    assert.equal(r.deleted_count, 0);
+    assert.ok(!calls.some(c => /delete_alerts/.test(c)), 'no delete issued when nothing to delete');
+  });
+
+  it('throws when the REST call returns a non-ok status', async () => {
+    const { _deps } = delDeps({ deleteResult: { s: 'error', errmsg: 'invalid_request' } });
+    await assert.rejects(() => deleteAlerts({ alert_ids: 7, _deps }), /delete_alerts failed: invalid_request/);
+  });
+
+  it('throws on a transport error from the page fetch', async () => {
+    const { _deps } = delDeps({ deleteResult: { error: 'Failed to fetch' } });
+    await assert.rejects(() => deleteAlerts({ alert_ids: 7, _deps }), /Failed to fetch/);
   });
 });
 
