@@ -27,5 +27,4 @@
       createStudy bounded-poll path resolves the new entity id when the study count grows.
 
 ## 5. Validate
-- [ ] 5.1 `openspec validate verify-chart-readiness --strict` (openspec CLI not installed in this
-      environment — `npx openspec` could not resolve an executable; deferred to orchestrator).
+- [x] 5.1 `openspec validate verify-chart-readiness --strict`

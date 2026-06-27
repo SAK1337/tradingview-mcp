@@ -19,4 +19,4 @@
 - [x] 5.2 Unit test: dedup suppresses an unchanged poll using the fingerprint.
 
 ## 6. Validate
-- [ ] 6.1 `openspec validate optimize-pine-graphics-and-streaming --strict`
+- [x] 6.1 `openspec validate optimize-pine-graphics-and-streaming --strict`

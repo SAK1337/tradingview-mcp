@@ -18,4 +18,4 @@
       name) per platform. (Spawn-error surfacing is covered by the launch() failure-path code.)
 
 ## 5. Validate
-- [ ] 5.1 `openspec validate harden-tradingview-launch --strict` (run by orchestrator; not on agent PATH)
+- [x] 5.1 `openspec validate harden-tradingview-launch --strict`

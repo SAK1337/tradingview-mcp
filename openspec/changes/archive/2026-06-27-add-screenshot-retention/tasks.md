@@ -13,4 +13,4 @@
 - [x] 3.2 Unit test: retention prunes beyond the configured cap.
 
 ## 4. Validate
-- [ ] 4.1 `openspec validate add-screenshot-retention --strict`
+- [x] 4.1 `openspec validate add-screenshot-retention --strict`
