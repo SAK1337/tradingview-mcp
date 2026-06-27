@@ -1,7 +1,9 @@
 /**
  * Core alert logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, safeString, KNOWN_PATHS } from '../connection.js';
+
+const CHART_API = KNOWN_PATHS.chartApi;
 
 function _resolve(deps) {
   return {
@@ -30,7 +32,60 @@ const CONDITION_LABELS = {
   crossing_down: 'Crossing Down',
 };
 
+// The pricealerts API condition `series` type for each enum value (the REST
+// create/modify path; the dialog uses CONDITION_LABELS instead).
+const CONDITION_REST_TYPES = {
+  crossing: 'cross',
+  crossing_up: 'cross_up',
+  crossing_down: 'cross_down',
+};
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Page-side POST to a pricealerts endpoint. Every write MUST wrap its body in a
+// `payload` key and send text/plain (application/json triggers a CORS preflight
+// the server rejects); create/modify also want the x-usenewauth header. Captured
+// from the live TradingView client via CDP Network — see memory pricealerts-rest-api.
+function pricealertsJS(path, payloadObj, query = '') {
+  const body = JSON.stringify({ payload: payloadObj });
+  return `
+    fetch('https://pricealerts.tradingview.com/${path}${query}', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'x-usenewauth': 'true' },
+      body: ${JSON.stringify(body)}
+    })
+      .then(function(r) { return r.json(); })
+      .catch(function(e) { return { error: e.message }; })
+  `;
+}
+
+// The pricealerts envelope is { s: 'ok', r: <data> } on success and
+// { s: 'error', err: {...} } on failure; the page-side fetch maps transport
+// failures to { error }. Throw on either so callers never see a false success.
+function checkAlertOk(result, label) {
+  if (result?.error) throw new Error(result.error);
+  if (result?.s !== 'ok') throw new Error(`${label} failed: ${result?.errmsg || JSON.stringify(result)}`);
+  return result;
+}
+
+// Shared id-based op (delete/stop/restart). Normalizes alert_ids to an array,
+// optionally resolves "all" from list(), throws on no-target / non-ok. Returns
+// the affected ids.
+async function alertIdsOperation({ path, label, alert_ids, all = false, allFlag = 'all', _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
+  let ids = Array.isArray(alert_ids) ? alert_ids.slice() : (alert_ids != null ? [alert_ids] : []);
+  if (all) {
+    const listed = await list({ _deps });
+    ids = (listed.alerts || []).map(a => a.alert_id);
+  }
+  if (ids.length === 0) {
+    if (all) return [];
+    throw new Error(`Pass alert_ids (one id or an array) or ${allFlag}:true`);
+  }
+  checkAlertOk(await evaluateAsync(pricealertsJS(path, { alert_ids: ids })), label);
+  return ids;
+}
 
 // React in the alert dialog only honours TRUSTED pointer events, so the operator
 // dropdown and its options must be driven with real CDP mouse input — page-side
@@ -118,7 +173,71 @@ async function applyCondition(evaluate, getClient, condition) {
   return confirmed;
 }
 
+// Create an alert via the pricealerts REST API. Resolves the symbol's
+// currency-id + pro_name from the chart model (the API needs the wrapped
+// `={"currency-id":..,"symbol":..}` form — a plain ticker is rejected), maps the
+// condition to its series type, and uses a ~30-day expiration (further out is
+// rejected). Throws if the chart symbol can't be resolved or the API says no.
+async function createViaRest({ condition, price, message, _deps }) {
+  const { evaluate, evaluateAsync } = _resolve(_deps);
+  const type = CONDITION_REST_TYPES[condition];
+  const label = CONDITION_LABELS[condition];
+  if (!type) throw new Error(`Unknown alert condition '${condition}'`);
+
+  const ctx = await evaluate(`
+    (function() {
+      try {
+        var si = ${CHART_API}._chartWidget.model().mainSeries().symbolInfo();
+        if (!si || !si.currency_id || !si.pro_name) return null;
+        return { currency_id: si.currency_id, pro_name: si.pro_name, username: (window.user && window.user.username) || '' };
+      } catch (e) { return null; }
+    })()
+  `);
+  if (!ctx || !ctx.currency_id || !ctx.pro_name) throw new Error('Could not resolve chart symbol for REST alert create');
+
+  const symbol = `={"currency-id":"${ctx.currency_id}","symbol":"${ctx.pro_name}"}`;
+  const ticker = ctx.pro_name.split(':').pop();
+  const msg = message || `${ticker} ${label} ${price}`;
+  const expiration = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const payload = {
+    conditions: [{ type, frequency: 'on_first_fire', series: [{ type: 'barset' }, { type: 'value', value: price }], resolution: '1' }],
+    symbol, resolution: '1', message: msg,
+    sound_file: null, sound_duration: 0, popup: true, auto_deactivate: true,
+    email: true, sms_over_email: false, mobile_push: true, web_hook: null, name: null,
+    expiration, active: true, ignore_warnings: true,
+  };
+  const query = `?log_username=${encodeURIComponent(ctx.username)}&maintenance_unset_reason=initial_operated`;
+  const result = checkAlertOk(await evaluateAsync(pricealertsJS('create_alert', payload, query)), 'create_alert');
+  const r = result.r || {};
+  return {
+    success: true,
+    alert_id: r.id ?? r.alert_id ?? null,
+    price,
+    condition_requested: condition,
+    condition: label,
+    message: msg,
+    source: 'pricealerts_api',
+  };
+}
+
+// Create an alert. Prefers the REST API (fast, headless, reliable); falls back to
+// the DOM dialog when REST cannot run (e.g. symbol info unavailable) or fails, so
+// creation still works if the endpoint shape drifts.
 export async function create({ condition, price, message, _deps }) {
+  let restError;
+  try {
+    return await createViaRest({ condition, price, message, _deps });
+  } catch (err) {
+    restError = err;
+  }
+  try {
+    return await createViaDialog({ condition, price, message, _deps });
+  } catch (domError) {
+    throw new Error(`Alert create failed — REST: ${restError.message}; dialog: ${domError.message}`);
+  }
+}
+
+async function createViaDialog({ condition, price, message, _deps }) {
   const { evaluate, getClient } = _resolve(_deps);
 
   const opened = await openAlertDialog(evaluate, getClient);
@@ -203,40 +322,17 @@ export async function list({ _deps } = {}) {
   return { success: true, alert_count: result?.alerts?.length || 0, source: 'internal_api', alerts: result?.alerts || [] };
 }
 
-// Page-side fetch to the pricealerts delete endpoint. The body MUST be wrapped in
-// `payload` and sent as text/plain — application/json triggers a CORS preflight
-// the server rejects, and the bare `{alert_ids:[...]}` shape returns
-// invalid_request. Captured from the live TradingView client via CDP Network.
-function deleteAlertsJS(ids) {
-  const body = JSON.stringify({ payload: { alert_ids: ids } });
-  return `
-    fetch('https://pricealerts.tradingview.com/delete_alerts', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-      body: ${JSON.stringify(body)}
-    })
-      .then(function(r) { return r.json(); })
-      .catch(function(e) { return { error: e.message }; })
-  `;
+export async function deleteAlerts({ alert_ids, delete_all = false, _deps } = {}) {
+  const ids = await alertIdsOperation({ path: 'delete_alerts', label: 'delete_alerts', alert_ids, all: delete_all, allFlag: 'delete_all', _deps });
+  return { success: true, deleted_count: ids.length, deleted_ids: ids, source: 'pricealerts_api' };
 }
 
-export async function deleteAlerts({ alert_ids, delete_all = false, _deps } = {}) {
-  const { evaluateAsync } = _resolve(_deps);
+export async function pauseAlerts({ alert_ids, all = false, _deps } = {}) {
+  const ids = await alertIdsOperation({ path: 'stop_alerts', label: 'stop_alerts', alert_ids, all, _deps });
+  return { success: true, paused_count: ids.length, paused_ids: ids, source: 'pricealerts_api' };
+}
 
-  let ids = Array.isArray(alert_ids) ? alert_ids.slice() : (alert_ids != null ? [alert_ids] : []);
-
-  if (delete_all) {
-    const listed = await list({ _deps });
-    ids = (listed.alerts || []).map(a => a.alert_id);
-    if (ids.length === 0) return { success: true, deleted_count: 0, deleted_ids: [], source: 'pricealerts_api' };
-  }
-
-  if (ids.length === 0) throw new Error('Pass alert_ids (one id or an array) or delete_all:true');
-
-  const result = await evaluateAsync(deleteAlertsJS(ids));
-  if (result?.error) throw new Error(result.error);
-  if (result?.s !== 'ok') throw new Error(`delete_alerts failed: ${result?.errmsg || JSON.stringify(result)}`);
-
-  return { success: true, deleted_count: ids.length, deleted_ids: ids, source: 'pricealerts_api' };
+export async function resumeAlerts({ alert_ids, all = false, _deps } = {}) {
+  const ids = await alertIdsOperation({ path: 'restart_alerts', label: 'restart_alerts', alert_ids, all, _deps });
+  return { success: true, resumed_count: ids.length, resumed_ids: ids, source: 'pricealerts_api' };
 }
