@@ -50,11 +50,14 @@ The CLI SHALL exit with a non-zero status code when a command handler returns a 
 - **THEN** the process exits non-zero so scripts and CI detect the failure
 
 ### Requirement: Optional alert deletion mode
-`alert_delete` SHALL treat `delete_all` as optional defaulting to `false` and SHALL return a clear
-`success: false` (without throwing) when an unsupported individual deletion is requested.
+`alert_delete` SHALL treat `delete_all` as optional defaulting to `false`, and SHALL signal an
+unsupported individual deletion by THROWING an `Error` from core — so the tool wrapper converts it into
+`{ success: false, error }` with the MCP `isError` flag set — rather than returning a non-throwing
+`{ success: false }` payload directly from core. (This supersedes the prior non-throwing contract from
+`normalize-failure-signaling`, aligning `deleteAlerts()` with the core-throws failure-signaling rule.)
 
 #### Scenario: Called with no arguments
 - **WHEN** `alert_delete` is invoked without `delete_all`
-- **THEN** it does not throw an uncaught exception
-- **AND** it returns `{ success: false, error }` explaining that individual deletion is unsupported
+- **THEN** `deleteAlerts()` throws an `Error` explaining that individual deletion is unsupported
+- **AND** the tool surfaces `{ success: false, error }` with the MCP `isError` flag set
 
