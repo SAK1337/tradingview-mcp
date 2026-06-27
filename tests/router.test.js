@@ -9,6 +9,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { exitCodeFor } from '../src/cli/router.js';
 import { findStrategy } from '../src/core/data.js';
+import { findBarIndexRange } from '../src/core/chart.js';
+import { findCompileButton } from '../src/core/pine.js';
 
 describe('CLI — exitCodeFor', () => {
   it('returns 1 for an explicit success:false result', () => {
@@ -38,5 +40,41 @@ describe('data — findStrategy snippet builder', () => {
     assert.ok(snippet.includes('s.reportData || s.performance'));
     assert.ok(snippet.includes('var strat = null'));
     assert.ok(snippet.includes('dataSources()'));
+  });
+});
+
+describe('chart — findBarIndexRange snippet builder', () => {
+  it('embeds the from/to bounds and zooms the bar range', () => {
+    const snippet = findBarIndexRange(1700000000, 1700100000);
+    assert.equal(typeof snippet, 'string');
+    assert.ok(snippet.includes('1700000000'));
+    assert.ok(snippet.includes('1700100000'));
+    assert.ok(snippet.includes('bars.firstIndex()'));
+    assert.ok(snippet.includes('bars.lastIndex()'));
+    assert.ok(snippet.includes('zoomToBarsRange(fromIdx, toIdx)'));
+  });
+
+  it('interpolates distinct bounds for distinct args', () => {
+    assert.ok(findBarIndexRange(1, 2).includes('v[0] >= 1'));
+    assert.ok(findBarIndexRange(1, 2).includes('v[0] <= 2'));
+  });
+});
+
+describe('pine — findCompileButton snippet builder', () => {
+  it('default (compile) prefix-matches and echoes the button text', () => {
+    const snippet = findCompileButton();
+    assert.equal(typeof snippet, 'string');
+    assert.ok(snippet.includes('save and add to chart'));
+    assert.ok(snippet.includes('/^(Add to chart|Update on chart)/i'));
+    assert.ok(snippet.includes('return addBtn.textContent.trim()'));
+    assert.ok(snippet.includes("return 'Pine Save'"));
+  });
+
+  it('exact (smartCompile) matches exactly and reports canonical labels', () => {
+    const snippet = findCompileButton({ exact: true });
+    assert.ok(snippet.includes('/^add to chart$/i'));
+    assert.ok(snippet.includes('/^update on chart$/i'));
+    assert.ok(snippet.includes("return 'Add to chart'"));
+    assert.ok(snippet.includes("return 'Update on chart'"));
   });
 });

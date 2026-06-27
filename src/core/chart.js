@@ -189,12 +189,13 @@ export async function getVisibleRange() {
   return { success: true, visible_range: result.visible_range, bars_range: result.bars_range };
 }
 
-export async function setVisibleRange({ from, to, _deps }) {
-  const { evaluate } = _resolve(_deps);
-  const f = requireFinite(from, 'from');
-  const t = requireFinite(to, 'to');
-  await evaluate(`
-    (function() {
+/**
+ * Builds the page-side snippet that finds the bar-index range spanning
+ * [fromTime, toTime] (unix seconds) and zooms the time scale to it.
+ * Shared by setVisibleRange and scrollToDate so the scan lives in one place.
+ */
+export function findBarIndexRange(fromTime, toTime) {
+  return `
       var chart = ${CHART_API};
       var m = chart._chartWidget.model();
       var ts = m.timeScale();
@@ -204,10 +205,19 @@ export async function setVisibleRange({ from, to, _deps }) {
       var fromIdx = startIdx, toIdx = endIdx;
       for (var i = startIdx; i <= endIdx; i++) {
         var v = bars.valueAt(i);
-        if (v && v[0] >= ${f} && fromIdx === startIdx) fromIdx = i;
-        if (v && v[0] <= ${t}) toIdx = i;
+        if (v && v[0] >= ${fromTime} && fromIdx === startIdx) fromIdx = i;
+        if (v && v[0] <= ${toTime}) toIdx = i;
       }
-      ts.zoomToBarsRange(fromIdx, toIdx);
+      ts.zoomToBarsRange(fromIdx, toIdx);`;
+}
+
+export async function setVisibleRange({ from, to, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const f = requireFinite(from, 'from');
+  const t = requireFinite(to, 'to');
+  await evaluate(`
+    (function() {
+      ${findBarIndexRange(f, t)}
     })()
   `);
   await new Promise(r => setTimeout(r, ZOOM_SETTLE_MS));
@@ -241,19 +251,7 @@ export async function scrollToDate({ date }) {
 
   await evaluate(`
     (function() {
-      var chart = ${CHART_API};
-      var m = chart._chartWidget.model();
-      var ts = m.timeScale();
-      var bars = m.mainSeries().bars();
-      var startIdx = bars.firstIndex();
-      var endIdx = bars.lastIndex();
-      var fromIdx = startIdx, toIdx = endIdx;
-      for (var i = startIdx; i <= endIdx; i++) {
-        var v = bars.valueAt(i);
-        if (v && v[0] >= ${from} && fromIdx === startIdx) fromIdx = i;
-        if (v && v[0] <= ${to}) toIdx = i;
-      }
-      ts.zoomToBarsRange(fromIdx, toIdx);
+      ${findBarIndexRange(from, to)}
     })()
   `);
   await new Promise(r => setTimeout(r, ZOOM_SETTLE_MS));
