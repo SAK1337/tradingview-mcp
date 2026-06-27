@@ -48,6 +48,24 @@ function rectOf(findExpr) {
   return `(function(){ var el = ${findExpr}; if (!el) return null; var r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`;
 }
 
+// Type a value into an input by driving it with TRUSTED keyboard input: real
+// click to focus -> Ctrl+A to select existing text -> insertText -> Tab to
+// commit. A native-setter `.value` write updates only the visible field, not
+// TradingView's alert model, so the model keeps the dialog's seeded value and
+// the created alert lands at the wrong price (smoke-test finding). The commit
+// (Tab/blur) is what makes the model pick the value up.
+async function typeIntoField(client, rect, text) {
+  await realClick(client, rect.x, rect.y);
+  await sleep(150);
+  await client.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
+  await client.Input.dispatchKeyEvent({ type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
+  await sleep(120);
+  await client.Input.insertText({ text });
+  await sleep(120);
+  await client.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+  await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+}
+
 // Open the create-alert dialog. The header "Create alert" control opens the side
 // panel (wrong surface) and page-side clicks don't drive it, so the reliable path
 // is: right-click the chart pane -> click the "Add alert on <symbol>" context-menu
@@ -110,46 +128,35 @@ export async function create({ condition, price, message, _deps }) {
   // condition that can't be honoured fails loud and creates nothing.
   const confirmedLabel = await applyCondition(evaluate, getClient, condition);
 
+  const client = await getClient();
+
   // The context-menu entry seeds a price at the click location; override it with
-  // the requested price. The dialog uses hashed class names, so target the first
-  // visible text input inside the dialog (the Value field).
-  const priceSet = await evaluate(`
-    (function() {
-      var dlg = document.querySelector('[class*="dialog"]');
-      var inputs = dlg ? dlg.querySelectorAll('input[type="text"], input[type="number"]') : [];
-      function set(el) {
-        var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        nativeSet.call(el, ${safeString(String(price))});
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      for (var i = 0; i < inputs.length; i++) {
-        if (inputs[i].offsetParent !== null) { set(inputs[i]); return true; }
-      }
-      return false;
-    })()
-  `);
-
-  if (message) {
-    await evaluate(`
-      (function() {
-        var dlg = document.querySelector('[class*="dialog"]');
-        var textarea = (dlg && dlg.querySelector('textarea')) || document.querySelector('textarea[placeholder*="message"]');
-        if (textarea) {
-          var nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-          nativeSet.call(textarea, ${JSON.stringify(message)});
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      })()
-    `);
-  }
-
+  // the requested price via trusted keyboard input (a DOM `.value` write is
+  // ignored by the alert model). The dialog uses hashed class names, so target
+  // the first visible value input inside the dialog.
+  const PRICE_INPUT = `(function(){ var dlg = document.querySelector('[class*="dialog"]'); var ins = dlg ? dlg.querySelectorAll('input[type="text"], input[type="number"]') : []; for (var i = 0; i < ins.length; i++) { if (ins[i].offsetParent !== null) return ins[i]; } return null; })()`;
+  const priceRect = await evaluate(rectOf(PRICE_INPUT));
+  if (!priceRect) throw new Error('Could not find the price input in the alert dialog');
+  await typeIntoField(client, priceRect, String(price));
   await sleep(ALERT_FIELDS_SETTLE_MS);
+
+  // Verify the price committed BEFORE clicking Create, so a mis-set price fails
+  // loud instead of creating an alert at the wrong level.
+  const priceReadback = await evaluate(`(function(){ var el = ${PRICE_INPUT}; return el ? el.value : null; })()`);
+  const priceSet = priceReadback != null && Number(String(priceReadback).replace(/[,\s]/g, '')) === Number(price);
+  if (!priceSet) throw new Error(`Alert price not applied: requested ${price}, dialog holds ${safeString(String(priceReadback))}`);
+
+  // Best-effort custom message: type it into the dialog's message field if one is
+  // visible. The auto-generated message (symbol + condition + price) stands
+  // otherwise — message is cosmetic and never blocks alert creation.
+  if (message) {
+    const msgRect = await evaluate(rectOf(`(function(){ var dlg = document.querySelector('[class*="dialog"]'); var t = dlg && dlg.querySelector('textarea'); return (t && t.offsetParent !== null) ? t : null; })()`));
+    if (msgRect) { await typeIntoField(client, msgRect, message); await sleep(ALERT_FIELDS_SETTLE_MS); }
+  }
 
   // Click Create with real mouse (page-side clicks aren't trusted by the dialog).
   const createRect = await evaluate(rectOf(`(function(){ var b = document.querySelectorAll('button,[role="button"]'); for (var i = 0; i < b.length; i++) { if (/^create$/i.test((b[i].textContent || '').trim())) return b[i]; } return null; })()`));
   if (!createRect) throw new Error('Could not find Create button in alert dialog');
-  const client = await getClient();
   await realClick(client, createRect.x, createRect.y);
 
   return {
@@ -158,7 +165,7 @@ export async function create({ condition, price, message, _deps }) {
     condition_requested: condition,
     condition: confirmedLabel,
     message: message || '(none)',
-    price_set: !!priceSet,
+    price_set: priceSet,
     source: 'applied',
   };
 }

@@ -28,12 +28,15 @@ function scriptedDeps({
   rowFound = true,
   optionFound = true,
   readback = 'Crossing',
-  priceSet = true,
+  priceRectFound = true,
+  priceReadback = undefined,   // undefined => echo whatever was typed (commits cleanly)
   createFound = true,
+  msgTextarea = false,
 } = {}) {
   const calls = [];
   const mouse = [];
   const keys = [];
+  const typed = [];
   const evaluate = async (expr) => {
     calls.push(expr);
     if (/chart-gui-wrapper|chart-markup-table|canvas/.test(expr)) return paneFound ? { x: 50, y: 50 } : null;
@@ -42,8 +45,11 @@ function scriptedDeps({
     if (/operatorRow/.test(expr) && /getBoundingClientRect/.test(expr)) return rowFound ? { x: 70, y: 70 } : null;
     if (/\[role="option"\]/.test(expr)) return optionFound ? { x: 80, y: 80 } : null;     // option lookup by label
     if (/operatorRow/.test(expr) && /textContent/.test(expr)) return readback;            // condition read-back
-    if (/HTMLInputElement\.prototype/.test(expr)) return priceSet;
-    if (/HTMLTextAreaElement/.test(expr)) return undefined;
+    if (/textarea/.test(expr) && /getBoundingClientRect/.test(expr)) return msgTextarea ? { x: 85, y: 85 } : null;
+    if (/input\[type="text"\]/.test(expr) && /getBoundingClientRect/.test(expr)) return priceRectFound ? { x: 88, y: 88 } : null;
+    if (/input\[type="text"\]/.test(expr) && /\.value/.test(expr)) {                       // price read-back
+      return priceReadback !== undefined ? priceReadback : (typed.length ? typed[typed.length - 1] : null);
+    }
     if (/\^create\$/.test(expr)) return createFound ? { x: 90, y: 90 } : null;            // Create button rect
     return undefined;
   };
@@ -51,15 +57,16 @@ function scriptedDeps({
     Input: {
       dispatchMouseEvent: async (e) => { if (e.type === 'mousePressed') mouse.push(e); },
       dispatchKeyEvent: async (e) => { keys.push(e); },
+      insertText: async (e) => { typed.push(e.text); },
     },
   };
-  return { _deps: { evaluate, getClient: async () => fakeClient }, calls, mouse, keys };
+  return { _deps: { evaluate, getClient: async () => fakeClient }, calls, mouse, keys, typed };
 }
 
 describe('alerts.create — applies and verifies the condition', () => {
   it('selects the requested condition and reports the read-back, not a blind echo', async () => {
-    const { _deps, calls } = scriptedDeps({ readback: 'Crossing' });
-    const r = await create({ condition: 'crossing', price: 100, message: 'hi', _deps });
+    const { _deps, calls, typed } = scriptedDeps({ readback: 'Crossing' });
+    const r = await create({ condition: 'crossing', price: 100, _deps });
     assert.equal(r.success, true);
     assert.equal(r.price, 100);
     assert.equal(r.condition_requested, 'crossing');   // what was asked
@@ -68,6 +75,25 @@ describe('alerts.create — applies and verifies the condition', () => {
     assert.equal(r.price_set, true);
     // proves a condition-selection step actually ran (option lookup by label)
     assert.ok(calls.some(c => /\[role="option"\]/.test(c)), 'issued the condition-select evaluate');
+    // proves the price was driven by trusted keyboard input, not a DOM write
+    assert.ok(typed.includes('100'), 'typed the price into the dialog');
+  });
+
+  it('throws when the price did not commit (read-back differs from requested)', async () => {
+    // the value field shows a different number than requested -> fail before Create
+    const { _deps } = scriptedDeps({ priceReadback: '84,174.29' });
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 75000, _deps }),
+      /Alert price not applied/,
+    );
+  });
+
+  it('throws when the price input is not found in the dialog', async () => {
+    const { _deps } = scriptedDeps({ priceRectFound: false });
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 100, _deps }),
+      /Could not find the price input/,
+    );
   });
 
   it('maps each enum value to the matching dialog label on read-back', async () => {

@@ -71,7 +71,24 @@ has no matching `[role="option"]` in the dialog, `create()` throws
 Crossing Up, Crossing Down)` and does **not** click Create. This keeps the contract honest: a condition
 the UI cannot express never yields `success:true`.
 
-> Pending product call: whether to (a) extend the enum to `crossing`/`crossing_up`/`crossing_down`
-> (matching the real UI) and drop `greater_than`/`less_than`, or (b) keep the legacy enum and let the two
-> removed values fail-loud. Both are spec-compatible with §3; (a) is the cleaner long-term contract and is
-> recommended. Surfaced to the user before locking §1's mapping.
+> Resolved: the user chose (a) — extend the enum to `crossing`/`crossing_up`/`crossing_down` and drop
+> `greater_than`/`less_than`. Implemented in `src/tools/alerts.js` + `src/cli/commands/alerts.js`.
+
+## §1b — Price field also needs trusted keyboard input (live smoke finding)
+
+A real create-then-delete smoke test (production `core.create()`, not a probe) surfaced a second silent
+bug the Cancel-only e2e couldn't: the **condition applied correctly but the price did not**. The created
+alert used the context-menu-seeded price (e.g. `84,174.29`), not the requested one, while the result
+still reported `price_set:true`.
+
+Root cause is the same trusted-event gap as the dropdown, one layer down: a native-setter `.value` write
+plus a synthetic `input` event updates the visible field but **not** TradingView's internal alert model,
+so Create reads the seeded value. Even `Input.insertText` alone wasn't enough — the model only commits on
+**blur/Tab**. The fix (`typeIntoField`): real click to focus → Ctrl+A → `insertText` → **Tab to commit**,
+then **read the value back and verify it equals the request before clicking Create** (throw
+`Alert price not applied: …` otherwise, so a mis-set price fails loud *before* an alert exists).
+
+Verified live: production `create({condition:'crossing_up', price:72500})` produced an alert
+`"BTCUSDT Crossing Up 72,500.00"` (`cond:cross_up`), then cleaned up via the alerts-panel context menu.
+(The `pricealerts` REST delete shape could not be reverse-engineered — `POST /delete_alerts` exists but
+rejects every guessed body with `invalid_request`; `deleteAlerts()` still uses the UI path, unchanged.)
