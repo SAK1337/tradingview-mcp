@@ -671,11 +671,11 @@ export async function listScripts({ _deps } = {}) {
       .catch(function(e) { return {scripts: [], error: e.message}; })
   `);
 
+  if (scripts?.error) throw new Error(scripts.error);
   return {
     success: true,
     scripts: scripts?.scripts || [],
     count: scripts?.scripts?.length || 0,
     source: 'internal_api',
-    error: scripts?.error,
   };
 }

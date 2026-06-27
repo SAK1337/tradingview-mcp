@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { exitCodeFor } from '../src/cli/router.js';
 import { findStrategy } from '../src/core/data.js';
 import { findBarIndexRange } from '../src/core/chart.js';
-import { findCompileButton } from '../src/core/pine.js';
+import { findCompileButton, listScripts } from '../src/core/pine.js';
 
 describe('CLI — exitCodeFor', () => {
   it('returns 1 for an explicit success:false result', () => {
@@ -76,5 +76,20 @@ describe('pine — findCompileButton snippet builder', () => {
     assert.ok(snippet.includes('/^update on chart$/i'));
     assert.ok(snippet.includes("return 'Add to chart'"));
     assert.ok(snippet.includes("return 'Update on chart'"));
+  });
+});
+
+describe('pine — listScripts throws instead of success-with-error', () => {
+  it('throws when the pine-facade payload carries an error', async () => {
+    const _deps = { evaluateAsync: async () => ({ scripts: [], error: 'pine-facade 403' }) };
+    await assert.rejects(() => listScripts({ _deps }), /pine-facade 403/);
+  });
+
+  it('returns the success shape with no error field on the happy path', async () => {
+    const _deps = { evaluateAsync: async () => ({ scripts: [{ id: 'a', name: 'X' }] }) };
+    const r = await listScripts({ _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.count, 1);
+    assert.ok(!('error' in r), 'no embedded error field on success');
   });
 });
