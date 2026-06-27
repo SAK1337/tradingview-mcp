@@ -36,5 +36,27 @@ register('alert', {
         return core.deleteAlerts({ alert_ids: ids, delete_all: opts.all });
       },
     }],
+    ['pause', {
+      description: 'Pause (deactivate) alerts by id or all',
+      options: {
+        id: { type: 'string', description: 'Alert id(s) to pause, comma-separated (from `alert list`)' },
+        all: { type: 'boolean', description: 'Pause all alerts' },
+      },
+      handler: (opts) => {
+        const ids = opts.id ? opts.id.split(',').map(s => requireFinite(s.trim(), 'id')) : undefined;
+        return core.pauseAlerts({ alert_ids: ids, all: opts.all });
+      },
+    }],
+    ['resume', {
+      description: 'Resume (reactivate) alerts by id or all',
+      options: {
+        id: { type: 'string', description: 'Alert id(s) to resume, comma-separated (from `alert list`)' },
+        all: { type: 'boolean', description: 'Resume all alerts' },
+      },
+      handler: (opts) => {
+        const ids = opts.id ? opts.id.split(',').map(s => requireFinite(s.trim(), 'id')) : undefined;
+        return core.resumeAlerts({ alert_ids: ids, all: opts.all });
+      },
+    }],
   ]),
 });

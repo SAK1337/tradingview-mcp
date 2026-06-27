@@ -14,7 +14,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, deleteAlerts, list } from '../src/core/alerts.js';
+import { create, deleteAlerts, pauseAlerts, resumeAlerts, list } from '../src/core/alerts.js';
 
 // A scripted evaluate that classifies each page-side expression the rewritten
 // create() issues and returns a canned result, plus a fake CDP client that
@@ -210,6 +210,106 @@ describe('alerts.deleteAlerts — REST deletion via pricealerts API', () => {
   it('throws on a transport error from the page fetch', async () => {
     const { _deps } = delDeps({ deleteResult: { error: 'Failed to fetch' } });
     await assert.rejects(() => deleteAlerts({ alert_ids: 7, _deps }), /Failed to fetch/);
+  });
+});
+
+describe('alerts.create — REST path with dialog fallback', () => {
+  // Inject the symbol-context evaluate + the create_alert evaluateAsync so the
+  // REST path runs entirely offline.
+  function restDeps({ ctx = { currency_id: 'XTVCUSDT', pro_name: 'BINANCE:BTCUSDT', username: 'me' }, createResult = { s: 'ok', r: { id: 999 } } } = {}) {
+    const calls = [], asyncCalls = [];
+    const evaluate = async (expr) => { calls.push(expr); if (/symbolInfo/.test(expr)) return ctx; return undefined; };
+    const evaluateAsync = async (expr) => { asyncCalls.push(expr); if (/create_alert/.test(expr)) return createResult; return undefined; };
+    return { _deps: { evaluate, evaluateAsync }, calls, asyncCalls };
+  }
+
+  it('creates via REST and returns alert_id + confirmed condition', async () => {
+    const { _deps, asyncCalls } = restDeps();
+    const r = await create({ condition: 'crossing_up', price: 70000, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.source, 'pricealerts_api');
+    assert.equal(r.alert_id, 999);
+    assert.equal(r.condition_requested, 'crossing_up');
+    assert.equal(r.condition, 'Crossing Up');
+    const post = asyncCalls.find(c => /create_alert/.test(c));
+    assert.ok(/cross_up/.test(post), 'maps to the cross_up series type');
+    assert.ok(/currency-id/.test(post) && /XTVCUSDT/.test(post), 'builds the currency-id symbol');
+    assert.ok(/text\/plain/.test(post) && /x-usenewauth/.test(post), 'text/plain + x-usenewauth');
+  });
+
+  it('throws (failing create) when the REST API returns a non-ok status and no dialog deps exist', async () => {
+    // ctx resolves so REST runs; create_alert errors; no dialog mocks -> dialog
+    // fallback also fails -> combined error mentions the REST failure.
+    const { _deps } = restDeps({ createResult: { s: 'error', errmsg: 'invalid_request' } });
+    await assert.rejects(() => create({ condition: 'crossing_up', price: 1, _deps }), /create_alert failed: invalid_request/);
+  });
+
+  it('falls back to the dialog path when the chart symbol cannot be resolved', async () => {
+    // scriptedDeps drives the dialog; its evaluate returns undefined for the REST
+    // symbol-context probe, so createViaRest throws and the dialog path runs.
+    const { _deps } = scriptedDeps({ readback: 'Crossing Up' });
+    const r = await create({ condition: 'crossing_up', price: 100, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.source, 'applied'); // dialog path, not pricealerts_api
+  });
+});
+
+describe('alerts.pause / resume — via stop_alerts / restart_alerts', () => {
+  function opDeps({ listAlerts = [], result = { s: 'ok' } } = {}) {
+    const calls = [];
+    const evaluateAsync = async (expr) => {
+      calls.push(expr);
+      if (/list_alerts/.test(expr)) return { alerts: listAlerts };
+      if (/stop_alerts|restart_alerts/.test(expr)) return result;
+      return undefined;
+    };
+    return { _deps: { evaluateAsync }, calls };
+  }
+
+  it('pauses a single id via stop_alerts', async () => {
+    const { _deps, calls } = opDeps();
+    const r = await pauseAlerts({ alert_ids: 5, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.paused_count, 1);
+    assert.deepEqual(r.paused_ids, [5]);
+    assert.equal(r.source, 'pricealerts_api');
+    const post = calls.find(c => /stop_alerts/.test(c));
+    assert.ok(/payload/.test(post) && /alert_ids/.test(post) && /\[5\]/.test(post));
+  });
+
+  it('pauses an array of ids', async () => {
+    const { _deps } = opDeps();
+    const r = await pauseAlerts({ alert_ids: [1, 2], _deps });
+    assert.equal(r.paused_count, 2);
+    assert.deepEqual(r.paused_ids, [1, 2]);
+  });
+
+  it('pause all lists then stops every id', async () => {
+    const { _deps, calls } = opDeps({ listAlerts: [{ alert_id: 9 }] });
+    const r = await pauseAlerts({ all: true, _deps });
+    assert.equal(r.paused_count, 1);
+    assert.ok(calls.some(c => /list_alerts/.test(c)) && calls.some(c => /stop_alerts/.test(c)));
+  });
+
+  it('resumes a single id via restart_alerts', async () => {
+    const { _deps, calls } = opDeps();
+    const r = await resumeAlerts({ alert_ids: 7, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.resumed_count, 1);
+    assert.deepEqual(r.resumed_ids, [7]);
+    assert.ok(calls.some(c => /restart_alerts/.test(c)));
+  });
+
+  it('throws when no target is given', async () => {
+    const { _deps } = opDeps();
+    await assert.rejects(() => pauseAlerts({ _deps }), /Pass alert_ids \(one id or an array\) or all:true/);
+    await assert.rejects(() => resumeAlerts({ _deps }), /Pass alert_ids \(one id or an array\) or all:true/);
+  });
+
+  it('throws when the API returns a non-ok status', async () => {
+    const { _deps } = opDeps({ result: { s: 'error', errmsg: 'nope' } });
+    await assert.rejects(() => pauseAlerts({ alert_ids: 1, _deps }), /stop_alerts failed: nope/);
+    await assert.rejects(() => resumeAlerts({ alert_ids: 1, _deps }), /restart_alerts failed: nope/);
   });
 });
 

@@ -25,4 +25,22 @@ export function registerAlertTools(server) {
     try { return jsonResult(await core.deleteAlerts({ alert_ids, delete_all })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('alert_pause', 'Pause (deactivate) alerts by id (or all) via the pricealerts API', {
+    alert_ids: z.union([z.coerce.number().int(), z.array(z.coerce.number().int())]).optional()
+      .describe('Alert id or array of ids to pause (from alert_list). Omit and pass all to pause every alert.'),
+    all: z.coerce.boolean().optional().describe('Pause every alert'),
+  }, async ({ alert_ids, all }) => {
+    try { return jsonResult(await core.pauseAlerts({ alert_ids, all })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('alert_resume', 'Resume (reactivate) alerts by id (or all) via the pricealerts API', {
+    alert_ids: z.union([z.coerce.number().int(), z.array(z.coerce.number().int())]).optional()
+      .describe('Alert id or array of ids to resume (from alert_list). Omit and pass all to resume every alert.'),
+    all: z.coerce.boolean().optional().describe('Resume every alert'),
+  }, async ({ alert_ids, all }) => {
+    try { return jsonResult(await core.resumeAlerts({ alert_ids, all })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }
